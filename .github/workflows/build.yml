@@ -1,0 +1,230 @@
+name: LED 在线编译
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+    tags:
+      - "*"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  android:
+    name: 安卓客户端
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@main
+
+      - name: 设置 JDK 环境
+        uses: actions/setup-java@v4
+        with:
+          distribution: microsoft
+          java-version: 17
+
+      - name: 设置 Android SDK 环境
+        uses: android-actions/setup-android@v3
+
+      - name: 设置 Gradle 环境
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+          add-job-summary: never
+
+      - name: 缓存 Gradle 依赖
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle', '**/gradle.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: 构建安卓 APK
+        run: |
+          set -e
+          build_info="$(date +%F)-${GITHUB_SHA::7}"
+          gradle --no-daemon clean :app:assembleRelease -PbuildInfo="$build_info"
+          find android/app/build/outputs/apk -type f -name "*.apk"
+          cp android/app/build/outputs/apk/release/app-release-unsigned.apk led-overlay-android-unsigned.apk
+
+      - name: 签名安卓 APK
+        run: |
+          set -e
+          if [ -n "${{ secrets.KEYSTORE_PASSWORD }}" ] && [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
+            echo "使用仓库密钥签名"
+            echo "SIGNING_MODE=仓库密钥签名" >> "$GITHUB_ENV"
+            echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > keystore.jks
+            keystore_path="keystore.jks"
+            password="${{ secrets.KEYSTORE_PASSWORD }}"
+          else
+            echo "生成临时密钥签名"
+            echo "SIGNING_MODE=临时密钥签名" >> "$GITHUB_ENV"
+            keystore_path="keystore.jks"
+            password="ledOverlay"
+            keytool -genkeypair \
+              -v \
+              -keystore "$keystore_path" \
+              -storepass "$password" \
+              -alias key \
+              -keypass "$password" \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=LED Overlay, OU=Android, O=LED, L=Beijing, ST=Beijing, C=CN"
+          fi
+
+          build_tools="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
+          "$build_tools/apksigner" sign \
+            --ks "$keystore_path" \
+            --ks-key-alias key \
+            --ks-pass pass:"$password" \
+            --key-pass pass:"$password" \
+            --out led-overlay-android.apk \
+            --in led-overlay-android-unsigned.apk \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true
+
+          "$build_tools/apksigner" verify --verbose led-overlay-android.apk | tee apk-verify.txt
+
+      - name: 写入中文构建摘要
+        run: |
+          {
+            echo "## 安卓客户端构建摘要"
+            echo ""
+            echo "| 项目 | 内容 |"
+            echo "| --- | --- |"
+            echo "| Gradle 根项目 | LedOverlay |"
+            echo "| 请求任务 | clean :app:assembleRelease |"
+            echo "| Gradle 版本 | 8.7 |"
+            echo "| 构建结果 | 通过 |"
+            echo "| 签名方式 | ${SIGNING_MODE:-未知} |"
+            echo "| 输出文件 | led-overlay-android.apk |"
+            echo ""
+            echo "## APK 签名验证"
+            echo ""
+            echo '```text'
+            cat apk-verify.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 上传安卓 APK
+        uses: actions/upload-artifact@main
+        with:
+          name: led-overlay-android
+          path: led-overlay-android.apk
+
+  server:
+    name: 服务端-${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86_64-linux-musl
+            cc: musl-gcc
+            strip: strip
+            toolchain: ""
+            
+          - name: i686-linux-musl
+            cc: i686-linux-musl-gcc
+            strip: i686-linux-musl-strip
+            toolchain: i686-linux-musl-cross
+            
+          - name: aarch64-linux-musl
+            cc: aarch64-linux-musl-gcc
+            strip: aarch64-linux-musl-strip
+            toolchain: aarch64-linux-musl-cross
+            
+          - name: armv7-linux-musleabihf
+            cc: armv7l-linux-musleabihf-gcc
+            strip: armv7l-linux-musleabihf-strip
+            toolchain: armv7l-linux-musleabihf-cross
+            
+          - name: arm-linux-musleabi
+            cc: arm-linux-musleabi-gcc
+            strip: arm-linux-musleabi-strip
+            toolchain: arm-linux-musleabi-cross
+            
+          - name: mipsel-linux-muslsf
+            cc: mipsel-linux-muslsf-gcc
+            strip: mipsel-linux-muslsf-strip
+            toolchain: mipsel-linux-muslsf-cross
+            
+          - name: mips-linux-muslsf
+            cc: mips-linux-muslsf-gcc
+            strip: mips-linux-muslsf-strip
+            toolchain: mips-linux-muslsf-cross
+
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@main
+
+      - name: 安装依赖和 musl 交叉工具链
+        run: |
+          set -e
+          sudo apt-get update
+          sudo apt-get install -y build-essential musl-tools xxd wget tar
+
+          if [ -n "${{ matrix.toolchain }}" ]; then
+            mkdir -p /opt/musl_gcc
+            wget -c "https://github.com/lmq8267/Toolchain/releases/download/musl-cross/${{ matrix.toolchain }}.tgz" -P /opt/musl_gcc/
+            tar zxf "/opt/musl_gcc/${{ matrix.toolchain }}.tgz" -C /opt/musl_gcc/
+            echo "/opt/musl_gcc/${{ matrix.toolchain }}/bin" >> "$GITHUB_PATH"
+          fi
+
+      - name: 静态编译服务端
+        run: |
+          set -e
+          cd server
+          make clean
+          make min \
+            CC="${{ matrix.cc }}" \
+            STRIP="${{ matrix.strip }}"
+          file led_server
+          ldd led_server || true
+          cp -rf led_server ../led_server-${{ matrix.name }}
+
+      - name: 上传服务端静态二进制
+        uses: actions/upload-artifact@main
+        with:
+          name: led-overlay-server-${{ matrix.name }}
+          path: led_server-${{ matrix.name }}
+
+  release:
+    name: 发布到 GitHub Release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs:
+      - android
+      - server
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载产物
+        uses: actions/download-artifact@main
+        with:
+          path: artifacts
+
+      - name: 查看产物
+        run: find artifacts -type f -maxdepth 4
+
+      - name: 上传到 GitHub Release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: artifacts/**/*
+          tag: ${{ github.ref }}
+          overwrite: true
+          file_glob: true

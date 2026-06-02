@@ -1,0 +1,23 @@
+plugins {
+    id "com.android.application"
+}
+
+def appVersion = "${new Date().format("yyyyMMdd")}-${"git rev-parse --short HEAD".execute(null, rootDir).text.trim() ?: "unknown"}"
+
+android {
+    namespace "com.lmq8267.ledclient"
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.lmq8267.ledclient"
+        minSdk 14
+        targetSdk 35
+        versionCode 1
+        versionName appVersion
+        vectorDrawables.generatedDensities = ["mdpi", "hdpi", "xhdpi", "xxhdpi", "xxxhdpi"]
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+}
