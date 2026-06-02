@@ -2,10 +2,10 @@ CC ?= cc
 APP_VERSION ?= $(shell date +%Y%m%d)-$(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 CFLAGS ?= -O2 -Wall -Wextra -pthread
 CFLAGS += -DAPP_VERSION=\"$(APP_VERSION)\"
-LDFLAGS ?= -pthread
+LDFLAGS ?= -static -pthread
 STRIP ?= strip
 MIN_CFLAGS ?= -Os -ffunction-sections -fdata-sections -fno-unwind-tables -fno-asynchronous-unwind-tables -Wall -Wextra -pthread
-MIN_LDFLAGS ?= -pthread -Wl,--gc-sections -Wl,--as-needed
+MIN_LDFLAGS ?= -static -pthread -Wl,--gc-sections -Wl,--as-needed
 
 all: clean led_server
 min: clean led_server_min
