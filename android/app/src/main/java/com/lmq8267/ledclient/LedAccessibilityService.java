@@ -144,10 +144,23 @@ public class LedAccessibilityService extends AccessibilityService {
                 }
                 overlay.show(message, new OverlayView.Listener() {
                     @Override public void onFinished(String taskId) {
-                        // 显示完成
+                        sendAck(taskId, "completed", "无障碍显示完成");
                     }
                 });
+                sendAck(message.taskId, "received", "无障碍服务已收到");
+                sendAck(message.taskId, "displaying", "正在显示");
             }
         });
+    }
+
+    private boolean sendAck(String taskId, String status, String detail) {
+        org.json.JSONObject ack = new org.json.JSONObject();
+        try {
+            ack.put("type", "ack");
+            ack.put("taskId", taskId);
+            ack.put("status", status);
+            ack.put("detail", detail == null ? "" : detail);
+        } catch (Exception ignored) {}
+        return ws != null && ws.send(ack);
     }
 }
