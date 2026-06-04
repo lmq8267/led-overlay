@@ -53,7 +53,12 @@ public class LedService extends Service {
         super.onCreate();
         mainHandler = new Handler(Looper.getMainLooper());
         Prefs.store(this).edit().putBoolean(Prefs.KEY_RUNNING, true).apply();
-        startForeground(7, notification());
+        try {
+            startForeground(7, notification());
+        } catch (Exception ignored) {
+            // 小米电视 AppsRelaunchController 会拦截 setServiceForeground
+            // 忽略异常，作为一个普通后台服务运行
+        }
         scheduleWatchdog();
         mainHandler.postDelayed(pendingAckFlusher, 5000);
     }

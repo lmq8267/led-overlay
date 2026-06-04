@@ -1111,7 +1111,7 @@ public class MainActivity extends Activity {
         if (restartIfRunning && Prefs.running(this) && serverChanged) {
             Intent start = new Intent(this, LedService.class);
             start.setAction(Prefs.ACTION_START);
-            if (Build.VERSION.SDK_INT >= 26) startForegroundService(start);
+            if (Build.VERSION.SDK_INT >= 26 && !isTv()) startForegroundService(start);
             else startService(start);
             Prefs.setConnectionState(this, Prefs.CONNECTION_CONNECTING);
             updateServerStatusCard();
@@ -1136,7 +1136,7 @@ public class MainActivity extends Activity {
         boolean wasRunning = Prefs.running(this);
         Intent intent = new Intent(this, LedService.class);
         intent.setAction(Prefs.ACTION_START);
-        if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent);
+        if (Build.VERSION.SDK_INT >= 26 && !isTv()) startForegroundService(intent);
         else startService(intent);
         SharedPreferences.Editor editor = Prefs.store(this).edit()
                 .putBoolean(Prefs.KEY_RUNNING, true);
