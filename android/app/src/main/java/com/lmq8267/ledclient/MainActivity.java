@@ -878,8 +878,11 @@ public class MainActivity extends Activity {
                 getString(R.string.tv_adb_command, pkg),
                 getString(R.string.tv_adb_command2, pkg),
                 getString(R.string.tv_adb_command3, pkg),
+                getString(R.string.tv_adb_command4, pkg),
+                getString(R.string.tv_adb_command5, pkg),
         };
-        final String allCmds = cmds[0] + "\n" + cmds[1] + "\n" + cmds[2];
+        final String allCmds = cmds[0] + "\n" + cmds[1] + "\n" + cmds[2]
+                + "\n" + cmds[3] + "\n" + cmds[4];
 
         for (int i = 0; i < cmds.length; i++) {
             TextView codeView = new TextView(this);

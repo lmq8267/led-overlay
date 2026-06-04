@@ -67,6 +67,8 @@
     <string name="tv_adb_command">adb shell appops set %s SYSTEM_ALERT_WINDOW allow</string>
     <string name="tv_adb_command2">adb shell appops set %s RUN_IN_BACKGROUND allow</string>
     <string name="tv_adb_command3">adb shell appops set %s RUN_ANY_IN_BACKGROUND allow</string>
-    <string name="copy_adb">Copy ADB commands</string>
-    <string name="toast_adb_copied">ADB commands copied</string>
+    <string name="tv_adb_command4">adb shell settings put secure enabled_accessibility_services %s/.LedAccessibilityService</string>
+    <string name="tv_adb_command5">adb shell settings put secure accessibility_enabled 1</string>
+    <string name="copy_adb">Copy all 5 ADB commands</string>
+    <string name="toast_adb_copied">5 ADB commands copied</string>
 </resources>
