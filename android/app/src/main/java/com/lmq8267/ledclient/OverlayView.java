@@ -5,6 +5,7 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.PorterDuff;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.View;
@@ -48,6 +49,10 @@ final class OverlayView extends View {
 
     OverlayView(Context context) {
         super(context);
+        // CLEAR 模式在硬件加速画布上不受支持，需使用软件渲染层
+        if (Build.VERSION.SDK_INT >= 28) {
+            setLayerType(LAYER_TYPE_SOFTWARE, null);
+        }
     }
 
     void show(LedMessage message, Listener listener) {

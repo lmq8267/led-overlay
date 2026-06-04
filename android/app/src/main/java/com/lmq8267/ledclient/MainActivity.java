@@ -925,7 +925,11 @@ public class MainActivity extends Activity {
             right.setTextColor(COLOR_ACCENT);
             right.setOnClickListener(new View.OnClickListener() {
                 @Override public void onClick(View v) {
-                    startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/lmq8267/led-overlay")));
+                    try {
+                        startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/lmq8267/led-overlay")));
+                    } catch (Exception ignored) {
+                        showTip(getString(R.string.toast_open_settings_failed, getString(R.string.menu_about)), false);
+                    }
                 }
             });
         }
@@ -1099,9 +1103,13 @@ public class MainActivity extends Activity {
         }
         if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(this)) {
             if (showToast) showTip(getString(R.string.overlay_permission), false);
-            Intent intent = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    Uri.parse("package:" + getPackageName()));
-            startActivity(intent);
+            try {
+                Intent intent = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        Uri.parse("package:" + getPackageName()));
+                startActivity(intent);
+            } catch (Exception e) {
+                openAppDetailsSettings();
+            }
             return false;
         }
         if (Build.VERSION.SDK_INT >= 23) {
@@ -1112,7 +1120,11 @@ public class MainActivity extends Activity {
                 try {
                     startActivity(intent);
                 } catch (Exception ignored) {
-                    startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+                    try {
+                        startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+                    } catch (Exception ignored2) {
+                        openAppDetailsSettings();
+                    }
                 }
             }
         }
