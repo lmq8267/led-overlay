@@ -3,6 +3,7 @@ package com.lmq8267.ledclient;
 import android.app.ActivityManager;
 import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.pm.PackageManager;
 import android.content.Intent;
 import android.os.Build;
 
@@ -21,16 +22,17 @@ public class WatchdogReceiver extends BroadcastReceiver {
         if (!Prefs.running(context)) return;
         if (Prefs.server(context).trim().length() == 0) return;
 
-        // 检查 LedService 和 LedAccessibilityService 是否已在运行
-        if (isServiceRunning(context, LedService.class.getName())
-                || isServiceRunning(context, LedAccessibilityService.class.getName())) {
-            return; // 至少有一个服务存活，无需拉起
-        }
+        // 电视上无障碍服务由系统自动管理生命周期，看门狗不需要介入
+        if (context.getPackageManager().hasSystemFeature(PackageManager.FEATURE_LEANBACK)) return;
 
-        // 优先拉起无障碍服务（后台驻留能力更强）
-        Intent service = new Intent(context, LedAccessibilityService.class);
+        // 检查 LedService 是否已在运行
+        if (isServiceRunning(context, LedService.class.getName())) return;
+
+        // 服务已被杀，重新拉起
+        Intent service = new Intent(context, LedService.class);
         service.setAction(Prefs.ACTION_START);
-        context.startService(service);
+        if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(service);
+        else context.startService(service);
     }
 
     private boolean isServiceRunning(Context context, String serviceName) {
