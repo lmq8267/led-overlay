@@ -841,7 +841,7 @@ public class MainActivity extends Activity {
                 }));
 
         boolean batteryOk = true;
-        if (Build.VERSION.SDK_INT >= 23) {
+        if (Build.VERSION.SDK_INT >= 23 && !isTv()) {
             PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
             batteryOk = pm == null || pm.isIgnoringBatteryOptimizations(getPackageName());
         }
@@ -1113,7 +1113,7 @@ public class MainActivity extends Activity {
             }
             return false;
         }
-        if (Build.VERSION.SDK_INT >= 23) {
+        if (Build.VERSION.SDK_INT >= 23 && !isTv()) {
             PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
             if (pm != null && !pm.isIgnoringBatteryOptimizations(getPackageName())) {
                 Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
@@ -1239,7 +1239,7 @@ public class MainActivity extends Activity {
 
     private void openBatteryOptimizationSettings() {
         try {
-            if (Build.VERSION.SDK_INT >= 23) {
+            if (Build.VERSION.SDK_INT >= 23 && !isTv()) {
                 PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
                 if (pm != null && !pm.isIgnoringBatteryOptimizations(getPackageName())) {
                     Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
