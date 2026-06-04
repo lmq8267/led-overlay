@@ -353,9 +353,8 @@ public class LedService extends Service {
         boolean sent = sendAck(taskId, status, detail);
         if (sent) {
             Prefs.removePendingAck(this, taskId, status);
-        } else if ("displaying".equals(status)) {
-            Prefs.removePendingAck(this, taskId, status);
         } else {
+            sendAckHttp(taskId, status, detail);
             Prefs.addPendingAck(this, taskId, status);
             LogStore.append(this, status + " ACK 发送失败，等待补发：" + taskId);
         }

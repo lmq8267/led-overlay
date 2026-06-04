@@ -104,7 +104,8 @@ public class MainActivity extends Activity {
         load();
         renderHome();
         requestStartupPermissions(false);
-        if (Prefs.server(this).trim().length() > 0) startClient(false);
+        // 电视上无障碍服务已接管连接，不再启动 LedService 避免双连接
+        if (!isTv() && Prefs.server(this).trim().length() > 0) startClient(false);
     }
 
     @Override
@@ -1109,10 +1110,12 @@ public class MainActivity extends Activity {
             serverInput.setText(displayAddress(Prefs.server(this)));
         refreshServerSuggestions();
         if (restartIfRunning && Prefs.running(this) && serverChanged) {
-            Intent start = new Intent(this, LedService.class);
-            start.setAction(Prefs.ACTION_START);
-            if (Build.VERSION.SDK_INT >= 26 && !isTv()) startForegroundService(start);
-            else startService(start);
+            if (!isTv()) {
+                Intent start = new Intent(this, LedService.class);
+                start.setAction(Prefs.ACTION_START);
+                if (Build.VERSION.SDK_INT >= 26 && !isTv()) startForegroundService(start);
+                else startService(start);
+            }
             Prefs.setConnectionState(this, Prefs.CONNECTION_CONNECTING);
             updateServerStatusCard();
         }
@@ -1133,6 +1136,20 @@ public class MainActivity extends Activity {
             return;
         }
         if (!requestStartupPermissions(true)) return;
+        // 电视上无障碍服务已接管连接，无需启动 LedService
+        if (isTv()) {
+            boolean wasRunning = Prefs.running(this);
+            Prefs.store(this).edit()
+                    .putBoolean(Prefs.KEY_RUNNING, true)
+                    .putString(Prefs.KEY_CONNECTION_STATE, Prefs.CONNECTION_CONNECTING)
+                    .apply();
+            updateRunButton(true);
+            updateStatus(true);
+            updateServerStatusCard();
+            if (page == 0) renderHome();
+            if (showToast) showTip(getString(R.string.toast_started), true);
+            return;
+        }
         boolean wasRunning = Prefs.running(this);
         Intent intent = new Intent(this, LedService.class);
         intent.setAction(Prefs.ACTION_START);

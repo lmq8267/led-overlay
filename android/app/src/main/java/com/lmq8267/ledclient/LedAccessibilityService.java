@@ -226,9 +226,9 @@ public class LedAccessibilityService extends AccessibilityService {
         boolean sent = sendAck(taskId, status, detail);
         if (sent) {
             Prefs.removePendingAck(this, taskId, status);
-        } else if ("displaying".equals(status)) {
-            Prefs.removePendingAck(this, taskId, status);
         } else {
+            // WS 发送失败，立即尝试 HTTP 兜底
+            sendAckHttp(taskId, status, detail);
             Prefs.addPendingAck(this, taskId, status);
             LogStore.append(this, status + " ACK 发送失败，等待补发：" + taskId);
         }
