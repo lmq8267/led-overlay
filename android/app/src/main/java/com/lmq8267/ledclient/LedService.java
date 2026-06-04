@@ -489,12 +489,17 @@ public class LedService extends Service {
     }
 
     // ── 看门狗：MIUI 等系统会忽略 START_STICKY 杀死后台服务 ──────
+    private PendingIntent watchdogPendingIntent() {
+        Intent intent = new Intent(this, WatchdogReceiver.class);
+        return PendingIntent.getBroadcast(this, 0, intent,
+                Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT : 0);
+    }
+
     private void scheduleWatchdog() {
         AlarmManager am = (AlarmManager) getSystemService(ALARM_SERVICE);
         if (am == null) return;
-        Intent intent = new Intent(this, WatchdogReceiver.class);
-        PendingIntent pi = PendingIntent.getBroadcast(this, 0, intent,
-                Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE : 0);
+        cancelWatchdog(); // 先取消已有闹钟，防止重复
+        PendingIntent pi = watchdogPendingIntent();
         long interval = 3 * 60 * 1000; // 每 3 分钟检查一次
         long trigger = System.currentTimeMillis() + interval;
         am.setInexactRepeating(AlarmManager.RTC_WAKEUP, trigger, interval, pi);
@@ -503,10 +508,7 @@ public class LedService extends Service {
     private void cancelWatchdog() {
         AlarmManager am = (AlarmManager) getSystemService(ALARM_SERVICE);
         if (am == null) return;
-        Intent intent = new Intent(this, WatchdogReceiver.class);
-        PendingIntent pi = PendingIntent.getBroadcast(this, 0, intent,
-                Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE : 0);
-        am.cancel(pi);
+        am.cancel(watchdogPendingIntent());
     }
 
     private Notification notification() {
