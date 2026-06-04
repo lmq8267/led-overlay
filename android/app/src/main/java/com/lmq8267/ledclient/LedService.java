@@ -353,9 +353,10 @@ public class LedService extends Service {
         boolean sent = sendAck(taskId, status, detail);
         if (sent) {
             Prefs.removePendingAck(this, taskId, status);
-        } else if ("displaying".equals(status)) {
-            Prefs.removePendingAck(this, taskId, status);
         } else {
+            // WS 发送失败 → HTTP 兜底 + 1s/3s 重试（与 completed 同级）
+            sendAckHttp(taskId, status, detail);
+            scheduleAckRetry(taskId, status, detail);
             Prefs.addPendingAck(this, taskId, status);
             LogStore.append(this, status + " ACK 发送失败，等待补发：" + taskId);
         }
@@ -388,6 +389,37 @@ public class LedService extends Service {
 
     private boolean shouldRetryCompletedAck(String taskId) {
         return Prefs.isTaskDone(this, taskId) && Prefs.hasPendingCompletedAck(this, taskId);
+    }
+
+    /** 通用 ACK HTTP 重试（received/displaying/failed 等非 completed 状态） */
+    private void scheduleAckRetry(final String taskId, final String status, final String detail) {
+        if (taskId == null || taskId.length() == 0 || mainHandler == null) return;
+        synchronized (completedAckRetries) {
+            if (completedAckRetries.contains(taskId)) return;
+            completedAckRetries.add(taskId);
+        }
+        mainHandler.postDelayed(new Runnable() {
+            @Override public void run() {
+                if (shouldRetryAck(taskId, status)) {
+                    sendAckHttp(taskId, status, detail);
+                }
+            }
+        }, 1000);
+        mainHandler.postDelayed(new Runnable() {
+            @Override public void run() {
+                if (shouldRetryAck(taskId, status)) {
+                    sendAckHttp(taskId, status, detail);
+                }
+                synchronized (completedAckRetries) {
+                    completedAckRetries.remove(taskId);
+                }
+            }
+        }, 3000);
+    }
+
+    private boolean shouldRetryAck(String taskId, String status) {
+        String pending = Prefs.pendingAcks(this);
+        return pending.contains("|" + status + ":" + taskId + "|");
     }
 
     private void sendCompletedAckHttp(final String taskId, final String detail) {
