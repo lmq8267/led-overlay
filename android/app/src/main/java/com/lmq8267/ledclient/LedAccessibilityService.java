@@ -3,6 +3,8 @@ package com.lmq8267.ledclient;
 import android.accessibilityservice.AccessibilityService;
 import android.content.Intent;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
 
@@ -22,6 +24,7 @@ public class LedAccessibilityService extends AccessibilityService {
     private WsClient ws;
     private Thread thread;
     private String currentServer = "";
+    private android.os.Handler mainHandler;
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
@@ -35,6 +38,7 @@ public class LedAccessibilityService extends AccessibilityService {
     @Override
     public void onServiceConnected() {
         super.onServiceConnected();
+        mainHandler = new Handler(Looper.getMainLooper());
         windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
         startClient();
     }
@@ -106,29 +110,34 @@ public class LedAccessibilityService extends AccessibilityService {
     }
 
     private void receiveMessage(final LedMessage message) {
-        if (overlay == null) {
-            overlay = new OverlayView(this);
-            int type = Build.VERSION.SDK_INT >= 26
-                    ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-                    : WindowManager.LayoutParams.TYPE_PHONE;
-            WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
-                    WindowManager.LayoutParams.MATCH_PARENT,
-                    (int) (getResources().getDisplayMetrics().heightPixels * 0.12f),
-                    type,
-                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                            | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
-                    android.graphics.PixelFormat.TRANSLUCENT);
-            lp.gravity = android.view.Gravity.TOP | android.view.Gravity.LEFT;
-            try {
-                windowManager.addView(overlay, lp);
-            } catch (Exception e) {
-                LogStore.append(this, "Accessibility overlay failed: " + e.getMessage());
-                return;
-            }
-        }
-        overlay.show(message, new OverlayView.Listener() {
-            @Override public void onFinished(String taskId) {
-                // 显示完成
+        mainHandler.post(new Runnable() {
+            @Override public void run() {
+                if (overlay == null) {
+                    overlay = new OverlayView(LedAccessibilityService.this);
+                    int type = Build.VERSION.SDK_INT >= 26
+                            ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                            : WindowManager.LayoutParams.TYPE_PHONE;
+                    WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
+                            WindowManager.LayoutParams.MATCH_PARENT,
+                            (int) (getResources().getDisplayMetrics().heightPixels * 0.12f),
+                            type,
+                            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                                    | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                            android.graphics.PixelFormat.TRANSLUCENT);
+                    lp.gravity = android.view.Gravity.TOP | android.view.Gravity.LEFT;
+                    try {
+                        windowManager.addView(overlay, lp);
+                    } catch (Exception e) {
+                        LogStore.append(LedAccessibilityService.this,
+                                "Accessibility overlay failed: " + e.getMessage());
+                        return;
+                    }
+                }
+                overlay.show(message, new OverlayView.Listener() {
+                    @Override public void onFinished(String taskId) {
+                        // 显示完成
+                    }
+                });
             }
         });
     }
