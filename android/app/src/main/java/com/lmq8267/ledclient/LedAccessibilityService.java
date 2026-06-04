@@ -1,12 +1,18 @@
 package com.lmq8267.ledclient;
 
 import android.accessibilityservice.AccessibilityService;
-import android.content.Intent;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
+
+import org.json.JSONObject;
+
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.util.ArrayList;
 
 /**
  * 无障碍服务：绕过小米电视 AppsRelaunchController 的前台服务拦截
@@ -24,7 +30,17 @@ public class LedAccessibilityService extends AccessibilityService {
     private WsClient ws;
     private Thread thread;
     private String currentServer = "";
-    private android.os.Handler mainHandler;
+    private Handler mainHandler;
+    private String lastHttpAckError = "";
+    private final ArrayList<String> completedAckRetries = new ArrayList<String>();
+    private final Runnable pendingAckFlusher = new Runnable() {
+        @Override public void run() {
+            flushPendingCompletedAcks();
+            if (Prefs.running(LedAccessibilityService.this) && mainHandler != null) {
+                mainHandler.postDelayed(this, 5000);
+            }
+        }
+    };
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
@@ -50,10 +66,12 @@ public class LedAccessibilityService extends AccessibilityService {
             windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
         }
         startClient();
+        mainHandler.postDelayed(pendingAckFlusher, 5000);
     }
 
     @Override
     public void onDestroy() {
+        if (mainHandler != null) mainHandler.removeCallbacks(pendingAckFlusher);
         if (ws != null) ws.stop();
         if (overlay != null) {
             try { windowManager.removeView(overlay); } catch (Exception ignored) {}
@@ -78,23 +96,33 @@ public class LedAccessibilityService extends AccessibilityService {
         final WsClient client = new WsClient(server, new WsClient.Listener() {
             @Override public void onOpen() {
                 LogStore.append(LedAccessibilityService.this, getString(R.string.log_connected, target));
-                org.json.JSONObject hello = new org.json.JSONObject();
+                JSONObject hello = new JSONObject();
                 try {
                     hello.put("type", "hello");
                     hello.put("clientId", Prefs.clientId(LedAccessibilityService.this));
                     hello.put("name", Build.MANUFACTURER + " " + Build.MODEL);
                 } catch (Exception ignored) {}
                 clientRef[0].send(hello);
+                flushPendingCompletedAcks();
             }
 
             @Override public void onText(String text) {
                 LogStore.append(LedAccessibilityService.this, getString(R.string.log_message, text));
                 try {
-                    org.json.JSONObject json = new org.json.JSONObject(text);
+                    JSONObject json = new JSONObject(text);
                     String type = json.optString("type");
                     if ("message".equals(type)) {
-                        receiveMessage(LedMessage.fromJson(json));
+                        String taskId = json.optString("taskId", "");
+                        try {
+                            receiveMessage(LedMessage.fromJson(json));
+                        } catch (Exception e) {
+                            String reason = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+                            LogStore.append(LedAccessibilityService.this,
+                                    getString(R.string.log_invalid_message, reason));
+                            if (taskId.length() > 0) sendAckReliable(taskId, "failed", "客户端解析消息失败：" + reason);
+                        }
                     }
+                    else if ("cancel".equals(type)) cancel(json.optString("taskId"));
                 } catch (Exception e) {
                     LogStore.append(LedAccessibilityService.this,
                             getString(R.string.log_invalid_message, e.getMessage()));
@@ -139,28 +167,185 @@ public class LedAccessibilityService extends AccessibilityService {
                     } catch (Exception e) {
                         LogStore.append(LedAccessibilityService.this,
                                 "Accessibility overlay failed: " + e.getMessage());
+                        String reason = "悬浮窗创建失败：" + e.getMessage();
+                        sendAckReliable(message.taskId, "failed", reason);
                         return;
                     }
                 }
+                sendAckReliable(message.taskId, "received", "客户端已收到消息");
                 overlay.show(message, new OverlayView.Listener() {
                     @Override public void onFinished(String taskId) {
-                        sendAck(taskId, "completed", "无障碍显示完成");
+                        Prefs.markTaskDone(LedAccessibilityService.this, taskId);
+                        sendAckReliable(taskId, "completed", "无障碍显示完成");
                     }
                 });
-                sendAck(message.taskId, "received", "无障碍服务已收到");
-                sendAck(message.taskId, "displaying", "正在显示");
+                sendAckReliable(message.taskId, "displaying", "正在通过无障碍服务显示");
             }
         });
     }
 
+    private void cancel(final String taskId) {
+        if (overlay == null) return;
+        overlay.post(new Runnable() {
+            @Override public void run() {
+                overlay.cancel(taskId);
+            }
+        });
+    }
+
+    // ═══════════════════════════════════════════════════════
+    //  ACK 逻辑（与 LedService 完全一致）
+    // ═══════════════════════════════════════════════════════
+
     private boolean sendAck(String taskId, String status, String detail) {
-        org.json.JSONObject ack = new org.json.JSONObject();
+        JSONObject ack = new JSONObject();
         try {
             ack.put("type", "ack");
             ack.put("taskId", taskId);
             ack.put("status", status);
             ack.put("detail", detail == null ? "" : detail);
         } catch (Exception ignored) {}
-        return ws != null && ws.send(ack);
+        boolean sent = ws != null && ws.send(ack);
+        return sent;
+    }
+
+    private void sendAckReliable(String taskId, String status) {
+        sendAckReliable(taskId, status, "");
+    }
+
+    private void sendAckReliable(String taskId, String status, String detail) {
+        if ("completed".equals(status)) {
+            Prefs.addPendingCompletedAck(this, taskId);
+            sendCompletedAckHttp(taskId, detail);
+            scheduleCompletedAckRetry(taskId, detail);
+            return;
+        }
+        boolean sent = sendAck(taskId, status, detail);
+        if (sent) {
+            Prefs.removePendingAck(this, taskId, status);
+        } else if ("displaying".equals(status)) {
+            Prefs.removePendingAck(this, taskId, status);
+        } else {
+            Prefs.addPendingAck(this, taskId, status);
+            LogStore.append(this, status + " ACK 发送失败，等待补发：" + taskId);
+        }
+    }
+
+    private void scheduleCompletedAckRetry(final String taskId, final String detail) {
+        if (taskId == null || taskId.length() == 0 || mainHandler == null) return;
+        synchronized (completedAckRetries) {
+            if (completedAckRetries.contains(taskId)) return;
+            completedAckRetries.add(taskId);
+        }
+        mainHandler.postDelayed(new Runnable() {
+            @Override public void run() {
+                if (shouldRetryCompletedAck(taskId)) {
+                    sendCompletedAckHttp(taskId, detail);
+                }
+            }
+        }, 1000);
+        mainHandler.postDelayed(new Runnable() {
+            @Override public void run() {
+                if (shouldRetryCompletedAck(taskId)) {
+                    sendCompletedAckHttp(taskId, detail);
+                }
+                synchronized (completedAckRetries) {
+                    completedAckRetries.remove(taskId);
+                }
+            }
+        }, 3000);
+    }
+
+    private boolean shouldRetryCompletedAck(String taskId) {
+        return Prefs.isTaskDone(this, taskId) && Prefs.hasPendingCompletedAck(this, taskId);
+    }
+
+    private void sendCompletedAckHttp(final String taskId, final String detail) {
+        if (taskId == null || taskId.length() == 0) return;
+        new Thread(new Runnable() {
+            @Override public void run() {
+                boolean ok = sendAckHttp(taskId, "completed",
+                        detail == null ? "客户端显示完成，HTTP 兜底确认" : detail);
+                if (ok) {
+                    Prefs.removePendingCompletedAck(LedAccessibilityService.this, taskId);
+                    Prefs.removePendingAck(LedAccessibilityService.this, taskId, "received");
+                    Prefs.removePendingAck(LedAccessibilityService.this, taskId, "displaying");
+                    LogStore.append(LedAccessibilityService.this,
+                            "已完成 completed ACK HTTP 状态已上报：" + taskId);
+                } else {
+                    LogStore.append(LedAccessibilityService.this,
+                            "已完成 completed ACK HTTP 失败，等待补发：" + taskId
+                            + (lastHttpAckError.length() == 0 ? "" : "，" + lastHttpAckError));
+                }
+            }
+        }, "led-ack-http").start();
+    }
+
+    private boolean sendAckHttp(String taskId, String status, String detail) {
+        lastHttpAckError = "";
+        String[] urls = WsClient.normalizeHttpAckCandidates(Prefs.server(this));
+        JSONObject ack = new JSONObject();
+        try {
+            ack.put("type", "ack");
+            ack.put("clientId", Prefs.clientId(this));
+            ack.put("taskId", taskId);
+            ack.put("status", status);
+            ack.put("detail", detail == null ? "" : detail);
+        } catch (Exception ignored) {}
+        byte[] body;
+        try {
+            body = ack.toString().getBytes("UTF-8");
+        } catch (Exception e) {
+            return false;
+        }
+        for (int i = 0; i < urls.length; i++) {
+            HttpURLConnection conn = null;
+            try {
+                conn = (HttpURLConnection) new URL(urls[i]).openConnection();
+                conn.setConnectTimeout(3000);
+                conn.setReadTimeout(3000);
+                conn.setRequestMethod("POST");
+                conn.setDoOutput(true);
+                conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+                conn.setFixedLengthStreamingMode(body.length);
+                OutputStream out = conn.getOutputStream();
+                out.write(body);
+                out.close();
+                int code = conn.getResponseCode();
+                if (code >= 200 && code < 300) return true;
+                lastHttpAckError = urls[i] + " HTTP " + code;
+            } catch (Exception e) {
+                lastHttpAckError = urls[i] + " "
+                        + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
+            } finally {
+                if (conn != null) conn.disconnect();
+            }
+        }
+        return false;
+    }
+
+    private void flushPendingCompletedAcks() {
+        String all = Prefs.pendingAcks(this);
+        if (all.length() > 0) {
+            String[] entries = all.split("\\|");
+            for (int i = 0; i < entries.length; i++) {
+                int sep = entries[i].indexOf(':');
+                if (sep > 0 && sep + 1 < entries[i].length()) {
+                    String status = entries[i].substring(0, sep);
+                    String taskId = entries[i].substring(sep + 1);
+                    if ("displaying".equals(status)) {
+                        Prefs.removePendingAck(this, taskId, status);
+                    } else {
+                        sendAckReliable(taskId, status);
+                    }
+                }
+            }
+        }
+        String pending = Prefs.pendingCompletedAcks(this);
+        if (pending.length() == 0) return;
+        String[] ids = pending.split("\\|");
+        for (int i = 0; i < ids.length; i++) {
+            if (ids[i].length() > 0) sendAckReliable(ids[i], "completed");
+        }
     }
 }
