@@ -62,6 +62,7 @@
     <string name="log_invalid_message">Invalid message %1$s</string>
     <string name="log_disconnected">Disconnected %1$s</string>
     <string name="log_overlay_add_failed">Overlay add failed %1$s</string>
+    <string name="toast_a11y_required">TV requires Accessibility Service, see About page for ADB commands</string>
     <string name="tv_help_title">TV / No Overlay Settings?</string>
     <string name="tv_help_desc">If your device lacks the overlay permission switch, use ADB commands below (connect first via adb connect IP):</string>
     <string name="tv_adb_command">adb shell appops set %s SYSTEM_ALERT_WINDOW allow</string>

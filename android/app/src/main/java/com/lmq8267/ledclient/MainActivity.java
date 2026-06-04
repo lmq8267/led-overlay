@@ -1138,6 +1138,13 @@ public class MainActivity extends Activity {
         if (!requestStartupPermissions(true)) return;
         // 电视上无障碍服务已接管连接，无需启动 LedService
         if (isTv()) {
+            // 检查无障碍服务是否已开启
+            String a11y = Settings.Secure.getString(getContentResolver(), "enabled_accessibility_services");
+            boolean a11yEnabled = a11y != null && a11y.contains(".LedAccessibilityService");
+            if (!a11yEnabled) {
+                showTip(getString(R.string.toast_a11y_required), false);
+                return;
+            }
             boolean wasRunning = Prefs.running(this);
             Prefs.store(this).edit()
                     .putBoolean(Prefs.KEY_RUNNING, true)
