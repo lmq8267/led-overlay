@@ -5,6 +5,8 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.app.AlarmManager;
+import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.PixelFormat;
@@ -52,6 +54,7 @@ public class LedService extends Service {
         mainHandler = new Handler(Looper.getMainLooper());
         Prefs.store(this).edit().putBoolean(Prefs.KEY_RUNNING, true).apply();
         startForeground(7, notification());
+        scheduleWatchdog();
         mainHandler.postDelayed(pendingAckFlusher, 5000);
     }
 
@@ -68,6 +71,7 @@ public class LedService extends Service {
     @Override
     public void onDestroy() {
         if (mainHandler != null) mainHandler.removeCallbacks(pendingAckFlusher);
+        cancelWatchdog();
         connectionGeneration++;
         if (ws != null) ws.stop();
         if (overlay != null) {
@@ -482,6 +486,27 @@ public class LedService extends Service {
                 processDisplayQueue();
             }
         });
+    }
+
+    // ── 看门狗：MIUI 等系统会忽略 START_STICKY 杀死后台服务 ──────
+    private void scheduleWatchdog() {
+        AlarmManager am = (AlarmManager) getSystemService(ALARM_SERVICE);
+        if (am == null) return;
+        Intent intent = new Intent(this, WatchdogReceiver.class);
+        PendingIntent pi = PendingIntent.getBroadcast(this, 0, intent,
+                Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE : 0);
+        long interval = 3 * 60 * 1000; // 每 3 分钟检查一次
+        long trigger = System.currentTimeMillis() + interval;
+        am.setInexactRepeating(AlarmManager.RTC_WAKEUP, trigger, interval, pi);
+    }
+
+    private void cancelWatchdog() {
+        AlarmManager am = (AlarmManager) getSystemService(ALARM_SERVICE);
+        if (am == null) return;
+        Intent intent = new Intent(this, WatchdogReceiver.class);
+        PendingIntent pi = PendingIntent.getBroadcast(this, 0, intent,
+                Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE : 0);
+        am.cancel(pi);
     }
 
     private Notification notification() {
