@@ -40,7 +40,7 @@ echo ============================================
 echo.
 
 :: ── 连接 ──
-echo [1/5] 正在连接 %ADB_IP%:%ADB_PORT% ...
+echo [1/6] 正在连接 %ADB_IP%:%ADB_PORT% ...
 adb connect %ADB_IP%:%ADB_PORT%
 if %ERRORLEVEL% neq 0 (
     echo [!] 连接失败，请检查 IP 和端口是否正确
@@ -48,7 +48,7 @@ if %ERRORLEVEL% neq 0 (
     exit /b 1
 )
 echo.
-echo [2/5] 检查授权状态...
+echo [2/6] 检查授权状态...
 
 adb -s %ADB_IP%:%ADB_PORT% get-state >nul 2>&1
 if %ERRORLEVEL% neq 0 (
@@ -73,6 +73,7 @@ echo ║  即将执行以下操作：                       ║
 echo ║  1. SYSTEM_ALERT_WINDOW  → 允许悬浮窗    ║
 echo ║  2. RUN_IN_BACKGROUND    → 允许后台运行  ║
 echo ║  3. RUN_ANY_IN_BACKGROUND→ 允许任意后台  ║
+echo ║  4. 无障碍服务            → 开启后台驻留  ║
 echo ╚══════════════════════════════════════════╝
 echo.
 set /p CONFIRM=是否继续？(Y/n)：
@@ -83,28 +84,35 @@ if /i "%CONFIRM%"=="n" (
 )
 
 echo.
-echo [3/5] 设置悬浮窗权限...
+echo [3/6] 设置悬浮窗权限...
 adb -s %ADB_IP%:%ADB_PORT% shell appops set com.lmq8267.ledclient SYSTEM_ALERT_WINDOW allow
 echo    [OK] SYSTEM_ALERT_WINDOW = allow
 echo.
 
-echo [4/5] 设置后台运行权限...
+echo [4/6] 设置后台运行权限...
 adb -s %ADB_IP%:%ADB_PORT% shell appops set com.lmq8267.ledclient RUN_IN_BACKGROUND allow
 echo    [OK] RUN_IN_BACKGROUND = allow
 echo.
 
-echo [5/5] 设置任意后台运行权限...
+echo [5/6] 设置任意后台运行权限...
 adb -s %ADB_IP%:%ADB_PORT% shell appops set com.lmq8267.ledclient RUN_ANY_IN_BACKGROUND allow
 echo    [OK] RUN_ANY_IN_BACKGROUND = allow
+echo.
+
+echo [6/6] 开启无障碍服务（后台保活）...
+adb -s %ADB_IP%:%ADB_PORT% shell settings put secure enabled_accessibility_services com.lmq8267.ledclient/.LedAccessibilityService
+adb -s %ADB_IP%:%ADB_PORT% shell settings put secure accessibility_enabled 1
+echo    [OK] 无障碍服务已开启
 echo.
 
 :: ── 验证 ──
 echo  验证权限...
 adb -s %ADB_IP%:%ADB_PORT% shell appops get com.lmq8267.ledclient | findstr "SYSTEM_ALERT_WINDOW RUN_IN_BACKGROUND RUN_ANY_IN_BACKGROUND"
+adb -s %ADB_IP%:%ADB_PORT% shell settings get secure enabled_accessibility_services | findstr ledclient
 echo.
 
 echo ╔══════════════════════════════════════════╗
-echo ║   ✅ 全部权限设置完成！                   ║
-echo ║   请在电视上打开 LED悬浮屏 应用           ║
+echo ║   ✅ 全部设置完成！                      ║
+echo ║   请在电视上打开 LED悬浮屏 应用          ║
 echo ╚══════════════════════════════════════════╝
 pause

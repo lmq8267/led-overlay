@@ -39,12 +39,12 @@ echo "============================================"
 echo ""
 
 # ── 连接 ──
-echo "[1/5] 正在连接 ${ADB_IP}:${ADB_PORT} ..."
+echo "[1/6] 正在连接 ${ADB_IP}:${ADB_PORT} ..."
 adb connect "${ADB_IP}:${ADB_PORT}" 2>/dev/null
 echo ""
 
 # ── 检查授权 ──
-echo "[2/5] 检查授权状态..."
+echo "[2/6] 检查授权状态..."
 if ! adb -s "${ADB_IP}:${ADB_PORT}" get-state &>/dev/null; then
     echo "[!] adb 未授权或设备离线"
     echo "    请在电视上点击"允许 USB 调试"授权，然后按回车重试..."
@@ -64,6 +64,7 @@ echo "║  即将执行以下操作：                       ║"
 echo "║  1. SYSTEM_ALERT_WINDOW  → 允许悬浮窗    ║"
 echo "║  2. RUN_IN_BACKGROUND    → 允许后台运行  ║"
 echo "║  3. RUN_ANY_IN_BACKGROUND→ 允许任意后台  ║"
+echo "║  4. 无障碍服务            → 开启后台驻留  ║"
 echo "╚══════════════════════════════════════════╝"
 echo ""
 read -p "是否继续？(Y/n): " CONFIRM
@@ -74,27 +75,34 @@ fi
 echo ""
 
 # ── 设置权限 ──
-echo "[3/5] 设置悬浮窗权限..."
+echo "[3/6] 设置悬浮窗权限..."
 adb -s "${ADB_IP}:${ADB_PORT}" shell appops set "${PACKAGE}" SYSTEM_ALERT_WINDOW allow
 echo "    [OK] SYSTEM_ALERT_WINDOW = allow"
 echo ""
 
-echo "[4/5] 设置后台运行权限..."
+echo "[4/6] 设置后台运行权限..."
 adb -s "${ADB_IP}:${ADB_PORT}" shell appops set "${PACKAGE}" RUN_IN_BACKGROUND allow
 echo "    [OK] RUN_IN_BACKGROUND = allow"
 echo ""
 
-echo "[5/5] 设置任意后台运行权限..."
+echo "[5/6] 设置任意后台运行权限..."
 adb -s "${ADB_IP}:${ADB_PORT}" shell appops set "${PACKAGE}" RUN_ANY_IN_BACKGROUND allow
 echo "    [OK] RUN_ANY_IN_BACKGROUND = allow"
+echo ""
+
+echo "[6/6] 开启无障碍服务（后台保活）..."
+adb -s "${ADB_IP}:${ADB_PORT}" shell settings put secure enabled_accessibility_services "${PACKAGE}/.LedAccessibilityService"
+adb -s "${ADB_IP}:${ADB_PORT}" shell settings put secure accessibility_enabled 1
+echo "    [OK] 无障碍服务已开启"
 echo ""
 
 # ── 验证 ──
 echo "  验证权限..."
 adb -s "${ADB_IP}:${ADB_PORT}" shell appops get "${PACKAGE}" 2>/dev/null | grep -E "SYSTEM_ALERT_WINDOW|RUN_IN_BACKGROUND|RUN_ANY_IN_BACKGROUND"
+adb -s "${ADB_IP}:${ADB_PORT}" shell settings get secure enabled_accessibility_services 2>/dev/null | grep -E "${PACKAGE}"
 echo ""
 
 echo "╔══════════════════════════════════════════╗"
-echo "║   ✅ 全部权限设置完成！                   ║"
-echo "║   请在电视上打开 LED悬浮屏 应用           ║"
+echo "║   ✅ 全部设置完成！                      ║"
+echo "║   请在电视上打开 LED悬浮屏 应用          ║"
 echo "╚══════════════════════════════════════════╝"
