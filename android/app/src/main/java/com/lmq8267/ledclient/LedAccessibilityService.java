@@ -39,8 +39,16 @@ public class LedAccessibilityService extends AccessibilityService {
     public void onServiceConnected() {
         super.onServiceConnected();
         mainHandler = new Handler(Looper.getMainLooper());
-        // 使用无障碍专用覆盖层窗口管理器，无需 SYSTEM_ALERT_WINDOW 权限
-        windowManager = getOverlayWindowManager();
+        if (Build.VERSION.SDK_INT >= 30) {
+            try {
+                java.lang.reflect.Method m = AccessibilityService.class.getMethod("getOverlayWindowManager");
+                windowManager = (WindowManager) m.invoke(this);
+            } catch (Exception e) {
+                windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
+            }
+        } else {
+            windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
+        }
         startClient();
     }
 
@@ -115,10 +123,13 @@ public class LedAccessibilityService extends AccessibilityService {
             @Override public void run() {
                 if (overlay == null) {
                     overlay = new OverlayView(LedAccessibilityService.this);
+                    int windowType = Build.VERSION.SDK_INT >= 30
+                            ? WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
+                            : WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY;
                     WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
                             WindowManager.LayoutParams.MATCH_PARENT,
                             (int) (getResources().getDisplayMetrics().heightPixels * 0.12f),
-                            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                            windowType,
                             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                                     | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
                             android.graphics.PixelFormat.TRANSLUCENT);
