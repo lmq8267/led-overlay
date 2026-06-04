@@ -6,6 +6,7 @@ import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.graphics.PixelFormat;
 import android.os.Build;
 import android.os.Handler;
@@ -87,7 +88,8 @@ public class LedService extends Service {
     private void startClient() {
         final String server = Prefs.server(this);
         if (server.trim().length() == 0) return;
-        if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(this)) {
+        if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(this)
+                && !getPackageManager().hasSystemFeature(PackageManager.FEATURE_LEANBACK)) {
             LogStore.append(this, getString(R.string.log_overlay_permission_missing));
             Prefs.store(this).edit().putBoolean(Prefs.KEY_RUNNING, false).apply();
             stopSelf();

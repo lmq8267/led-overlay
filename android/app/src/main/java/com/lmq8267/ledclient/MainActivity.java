@@ -829,7 +829,7 @@ public class MainActivity extends Activity {
                     }
                 }));
 
-        boolean overlayOk = Build.VERSION.SDK_INT < 23 || Settings.canDrawOverlays(this);
+        boolean overlayOk = Build.VERSION.SDK_INT < 23 || Settings.canDrawOverlays(this) || isTv();
         card.addView(permissionRowWithDivider(
                 getString(R.string.permission_overlay),
                 overlayOk ? getString(R.string.permission_granted) : getString(R.string.permission_missing),
@@ -1101,7 +1101,8 @@ public class MainActivity extends Activity {
             if (showToast) showTip(getString(R.string.notification_permission), false);
             return false;
         }
-        if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(this)) {
+        if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(this)
+                && !isTv()) {
             if (showToast) showTip(getString(R.string.overlay_permission), false);
             try {
                 Intent intent = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
@@ -1394,6 +1395,11 @@ public class MainActivity extends Activity {
     // ═══════════════════════════════════════════════════════
     //  工具方法
     // ═══════════════════════════════════════════════════════
+
+    /** 检测是否为电视设备（电视无悬浮窗权限开关，需要特殊处理） */
+    private boolean isTv() {
+        return getPackageManager().hasSystemFeature(PackageManager.FEATURE_LEANBACK);
+    }
 
     private int dp(int value) {
         return (int) (value * getResources().getDisplayMetrics().density + 0.5f);
