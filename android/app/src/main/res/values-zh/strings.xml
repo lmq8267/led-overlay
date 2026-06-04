@@ -62,4 +62,9 @@
     <string name="log_invalid_message">消息格式错误 %1$s</string>
     <string name="log_disconnected">已断开 %1$s</string>
     <string name="log_overlay_add_failed">悬浮窗添加失败 %1$s</string>
+    <string name="tv_help_title">电视设备 / 没有悬浮窗开关？</string>
+    <string name="tv_help_desc">部分电视（如小米电视）没有悬浮窗权限设置页，可通过 ADB 命令授权：</string>
+    <string name="tv_adb_command">adb shell appops set %s SYSTEM_ALERT_WINDOW allow</string>
+    <string name="copy_adb">一键复制 ADB 命令</string>
+    <string name="toast_adb_copied">ADB 命令已复制</string>
 </resources>

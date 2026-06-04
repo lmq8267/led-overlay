@@ -810,6 +810,7 @@ public class MainActivity extends Activity {
 
         addCard(card);
         addPermissionStatusCard();
+        addTvHelpCard();
     }
 
     private void addPermissionStatusCard() {
@@ -862,6 +863,46 @@ public class MainActivity extends Activity {
                 Prefs.boot(this) ? getString(R.string.permission_enabled) : getString(R.string.permission_disabled),
                 Prefs.boot(this),
                 null));
+
+        addCard(card);
+    }
+
+    /** 电视端 ADB 授权帮助卡片 */
+    private void addTvHelpCard() {
+        LinearLayout card = cardContainer();
+        card.addView(sectionTitle(getString(R.string.tv_help_title), getString(R.string.tv_help_desc)));
+        card.addView(divider());
+
+        final String cmd = getString(R.string.tv_adb_command, getPackageName());
+
+        TextView codeView = new TextView(this);
+        codeView.setText(cmd);
+        codeView.setTextColor(COLOR_TEXT);
+        codeView.setTextSize(12);
+        codeView.setTypeface(Typeface.MONOSPACE);
+        codeView.setPadding(dp(12), dp(12), dp(12), dp(12));
+        codeView.setSingleLine(false);
+        codeView.setHorizontallyScrolling(false);
+        codeView.setLineSpacing(dp(2), 1);
+        if (Build.VERSION.SDK_INT >= 23) codeView.setBreakStrategy(android.text.Layout.BREAK_STRATEGY_HIGH_QUALITY);
+        GradientDrawable codeBg = new GradientDrawable();
+        codeBg.setColor(Color.rgb(248, 250, 252));
+        codeBg.setStroke(dp(1), Color.rgb(226, 232, 240));
+        codeBg.setCornerRadius(dp(10));
+        setBackgroundCompat(codeView, codeBg);
+        card.addView(codeView, fullWidth(-2, -2));
+
+        card.addView(spacer(dp(10)));
+
+        Button copyBtn = compactButton(getString(R.string.copy_adb), COLOR_ACCENT);
+        copyBtn.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                ClipboardManager mgr = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                mgr.setPrimaryClip(ClipData.newPlainText("ADB", cmd));
+                showTip(getString(R.string.toast_adb_copied), true);
+            }
+        });
+        card.addView(copyBtn, fullWidth(dp(40), -1));
 
         addCard(card);
     }
