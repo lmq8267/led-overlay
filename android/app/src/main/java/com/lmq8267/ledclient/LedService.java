@@ -489,21 +489,25 @@ public class LedService extends Service {
         PendingIntent pi = PendingIntent.getActivity(this, 0, open,
                 Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE : 0);
         if (Build.VERSION.SDK_INT >= 26) {
-            NotificationChannel channel = new NotificationChannel("led", "LED Overlay",
-                    NotificationManager.IMPORTANCE_LOW);
+            NotificationChannel channel = new NotificationChannel("led", getString(R.string.app_name),
+                    NotificationManager.IMPORTANCE_MIN);
+            channel.setShowBadge(false);
+            channel.setSound(null, null);
             NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
             manager.createNotificationChannel(channel);
             return new Notification.Builder(this, "led")
                     .setContentTitle(getString(R.string.app_name))
-                    .setContentText("Running")
+                    .setContentText(getString(R.string.client_running))
                     .setSmallIcon(R.drawable.ic_stat_led)
+                    .setOngoing(true)
                     .setContentIntent(pi)
                     .build();
         }
         return new Notification.Builder(this)
                 .setContentTitle(getString(R.string.app_name))
-                .setContentText("Running")
+                .setContentText(getString(R.string.client_running))
                 .setSmallIcon(R.drawable.ic_stat_led)
+                .setOngoing(true)
                 .setContentIntent(pi)
                 .build();
     }
