@@ -873,24 +873,35 @@ public class MainActivity extends Activity {
         card.addView(sectionTitle(getString(R.string.tv_help_title), getString(R.string.tv_help_desc)));
         card.addView(divider());
 
-        final String cmd = getString(R.string.tv_adb_command, getPackageName());
+        final String pkg = getPackageName();
+        final String[] cmds = new String[] {
+                getString(R.string.tv_adb_command, pkg),
+                getString(R.string.tv_adb_command2, pkg),
+                getString(R.string.tv_adb_command3, pkg),
+        };
+        final String allCmds = cmds[0] + "\n" + cmds[1] + "\n" + cmds[2];
 
-        TextView codeView = new TextView(this);
-        codeView.setText(cmd);
-        codeView.setTextColor(COLOR_TEXT);
-        codeView.setTextSize(12);
-        codeView.setTypeface(Typeface.MONOSPACE);
-        codeView.setPadding(dp(12), dp(12), dp(12), dp(12));
-        codeView.setSingleLine(false);
-        codeView.setHorizontallyScrolling(false);
-        codeView.setLineSpacing(dp(2), 1);
-        if (Build.VERSION.SDK_INT >= 23) codeView.setBreakStrategy(android.text.Layout.BREAK_STRATEGY_HIGH_QUALITY);
-        GradientDrawable codeBg = new GradientDrawable();
-        codeBg.setColor(Color.rgb(248, 250, 252));
-        codeBg.setStroke(dp(1), Color.rgb(226, 232, 240));
-        codeBg.setCornerRadius(dp(10));
-        setBackgroundCompat(codeView, codeBg);
-        card.addView(codeView, fullWidth(-2, -2));
+        for (int i = 0; i < cmds.length; i++) {
+            TextView codeView = new TextView(this);
+            codeView.setText(cmds[i]);
+            codeView.setTextColor(COLOR_TEXT);
+            codeView.setTextSize(12);
+            codeView.setTypeface(Typeface.MONOSPACE);
+            codeView.setPadding(dp(12), dp(10), dp(12), dp(10));
+            codeView.setSingleLine(false);
+            codeView.setHorizontallyScrolling(false);
+            codeView.setLineSpacing(dp(2), 1);
+            if (Build.VERSION.SDK_INT >= 23)
+                codeView.setBreakStrategy(android.text.Layout.BREAK_STRATEGY_HIGH_QUALITY);
+            GradientDrawable codeBg = new GradientDrawable();
+            codeBg.setColor(Color.rgb(248, 250, 252));
+            codeBg.setStroke(dp(1), Color.rgb(226, 232, 240));
+            codeBg.setCornerRadius(dp(10));
+            setBackgroundCompat(codeView, codeBg);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+            if (i < cmds.length - 1) lp.bottomMargin = dp(6);
+            card.addView(codeView, lp);
+        }
 
         card.addView(spacer(dp(10)));
 
@@ -898,7 +909,7 @@ public class MainActivity extends Activity {
         copyBtn.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
                 ClipboardManager mgr = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-                mgr.setPrimaryClip(ClipData.newPlainText("ADB", cmd));
+                mgr.setPrimaryClip(ClipData.newPlainText("ADB", allCmds));
                 showTip(getString(R.string.toast_adb_copied), true);
             }
         });

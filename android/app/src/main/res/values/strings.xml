@@ -63,8 +63,10 @@
     <string name="log_disconnected">Disconnected %1$s</string>
     <string name="log_overlay_add_failed">Overlay add failed %1$s</string>
     <string name="tv_help_title">TV / No Overlay Settings?</string>
-    <string name="tv_help_desc">If your device lacks the overlay permission switch, use the ADB command below to grant it:</string>
+    <string name="tv_help_desc">If your device lacks the overlay permission switch, use ADB commands below (connect first via adb connect IP):</string>
     <string name="tv_adb_command">adb shell appops set %s SYSTEM_ALERT_WINDOW allow</string>
-    <string name="copy_adb">Copy ADB command</string>
-    <string name="toast_adb_copied">ADB command copied</string>
+    <string name="tv_adb_command2">adb shell appops set %s RUN_IN_BACKGROUND allow</string>
+    <string name="tv_adb_command3">adb shell appops set %s RUN_ANY_IN_BACKGROUND allow</string>
+    <string name="copy_adb">Copy ADB commands</string>
+    <string name="toast_adb_copied">ADB commands copied</string>
 </resources>
