@@ -147,6 +147,9 @@ public class LedAccessibilityService extends AccessibilityService {
     }
 
     private void receiveMessage(final LedMessage message) {
+        // 收到消息立即回复"received"，服务器显示"待接收"
+        sendAckReliable(message.taskId, "received", "客户端已收到消息");
+
         mainHandler.post(new Runnable() {
             @Override public void run() {
                 if (overlay == null) {
@@ -167,19 +170,19 @@ public class LedAccessibilityService extends AccessibilityService {
                     } catch (Exception e) {
                         LogStore.append(LedAccessibilityService.this,
                                 "Accessibility overlay failed: " + e.getMessage());
-                        String reason = "悬浮窗创建失败：" + e.getMessage();
-                        sendAckReliable(message.taskId, "failed", reason);
+                        sendAckReliable(message.taskId, "failed", "悬浮窗创建失败：" + e.getMessage());
                         return;
                     }
                 }
-                sendAckReliable(message.taskId, "received", "客户端已收到消息");
+                // 开始显示 → 回复"displaying"，服务器显示"待显示"
+                sendAckReliable(message.taskId, "displaying", "正在通过无障碍服务显示");
                 overlay.show(message, new OverlayView.Listener() {
                     @Override public void onFinished(String taskId) {
                         Prefs.markTaskDone(LedAccessibilityService.this, taskId);
+                        // 显示完成 → 回复"completed"，服务器显示"已完成"
                         sendAckReliable(taskId, "completed", "无障碍显示完成");
                     }
                 });
-                sendAckReliable(message.taskId, "displaying", "正在通过无障碍服务显示");
             }
         });
     }
