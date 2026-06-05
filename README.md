@@ -133,11 +133,12 @@ make clean
 ```bash
 ./led_server --help
 ./led_server --version
+./led_server -P 默认密码
 ./led_server --reset-password 新密码
 ./led_server --home-path /hidden-admin
 ```
 
-首次启动如果没有持久化密码，会创建默认密码 `admin`。正式使用前应立即在页面中修改密码，或使用 `--reset-password` 初始化。
+首次启动如果没有持久化密码，会创建默认密码 `admin`。也可以用 `-P` 或 `--default-password` 指定状态文件缺失、异常或未保存密码时使用的默认密码。已有持久化密码不会被默认密码覆盖；正式使用前应立即在页面中修改密码，或使用 `--reset-password` 初始化。
 
 ## 构建 Android 客户端
 
@@ -169,6 +170,67 @@ http://192.168.8.185:12366
 - `RECEIVE_BOOT_COMPLETED`：开机后自动启动。
 
 不同厂商系统对后台运行、开机自启、悬浮窗权限限制不同。客户端首页的权限状态卡片用于快速检查这些前置条件。
+
+## TV 端说明
+
+手机和平板端优先使用 Android 标准悬浮窗权限和前台服务运行。部分电视系统，尤其是定制 Android TV、盒子系统和厂商深度定制系统，会禁止普通应用创建悬浮窗，或者在按 Home 后强制清理普通后台服务。
+
+TV 端因此采用无障碍服务模式：
+
+- 客户端安装后仍需要在首页填写服务端地址。
+- 通过 ADB 开启本应用的无障碍服务，让 TV 端可以在后台接收服务端消息并显示悬浮内容。
+- 首页打开时如果服务端地址不为空，且服务未处于连接中或已连接状态，会自动尝试启动连接。
+- 显示完成、失败、取消等状态都会通过 HTTP `/client-ack` 回退上报，避免 WebSocket ACK 因后台限制丢失。
+- 如果打开 APP 时没有待显示任务，会清理空闲残留悬浮层，避免上次异常退出后挡住界面。
+
+推荐 TV 端部署流程：
+
+```text
+1. 在电视上安装 Android 客户端。
+2. 打开电视开发者选项和网络 ADB 调试，确认电视 IP 和 ADB 端口，常见端口为 5555。
+3. 在同一局域网电脑上运行 docs/adb_grant.sh 或 docs/adb_grant.bat。
+4. 电视弹出 USB 调试授权时选择允许。
+5. 回到 APP 首页填写服务端地址，点击启动，之后按 Home 测试后台连接。
+```
+
+注意：ADB 网络调试属于高权限入口，只建议在可信局域网内临时开启。授权完成并确认运行稳定后，可按设备安全策略关闭不必要的调试入口。
+
+## docs ADB 脚本说明
+
+`docs/adb_grant.sh` 和 `docs/adb_grant.bat` 用于给 TV 端一键设置运行所需权限，并开启本应用无障碍服务。两个脚本功能一致，只是运行平台不同：
+
+| 脚本 | 运行环境 | 用途 |
+| --- | --- | --- |
+| `docs/adb_grant.sh` | Linux / macOS / WSL / Git Bash | 通过交互式命令连接电视 ADB，并设置权限 |
+| `docs/adb_grant.bat` | Windows CMD | 通过交互式命令连接电视 ADB，并设置权限 |
+
+脚本会执行的主要操作：
+
+- 检查本机是否已安装 `adb`。
+- 输入电视 IP 和端口后执行 `adb connect`。
+- 检查电视是否已授权 ADB 调试。
+- 检测本应用无障碍服务是否已经开启；如果已经正常开启，会提示无需重复开启并退出。
+- 如果系统标记本应用无障碍服务已崩溃，会刷新本应用的无障碍服务绑定。
+- 设置 `SYSTEM_ALERT_WINDOW`、`RUN_IN_BACKGROUND`、`RUN_ANY_IN_BACKGROUND` 等 appops 权限。
+- 追加开启 `com.lmq8267.ledclient/.LedAccessibilityService`，不会覆盖其它已经开启的无障碍服务。
+- 最后读取系统设置进行验证。
+
+Linux / macOS 使用：
+
+```bash
+cd docs
+chmod +x adb_grant.sh
+./adb_grant.sh
+```
+
+Windows 使用：
+
+```bat
+cd docs
+adb_grant.bat
+```
+
+如果脚本提示 `adb 未授权或设备离线`，请查看电视屏幕上的 USB 调试授权弹窗，选择允许后按脚本提示重试。如果脚本提示无障碍服务已经开启，说明当前设备无需重复执行授权。
 
 ## 状态与持久化
 
@@ -212,4 +274,3 @@ Android 客户端本地使用 `SharedPreferences` 保存：
 ### 默认密码提示仍出现
 
 - 服务端只有在状态文件中没有密码哈希时才会创建默认密码并提示。请确认运行中的服务端读取的是同一个 `/var/lib/led-overlay/state.db`，以及修改密码后服务端有权限写回该文件。
-

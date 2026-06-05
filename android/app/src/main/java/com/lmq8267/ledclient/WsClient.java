@@ -7,6 +7,7 @@ import org.json.JSONObject;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.IOException;
+import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.URI;
 import java.security.SecureRandom;
@@ -15,6 +16,9 @@ import java.util.Locale;
 import javax.net.ssl.SSLSocketFactory;
 
 final class WsClient {
+    private static final int CONNECT_TIMEOUT_MS = 5000;
+    private static final int READ_TIMEOUT_MS = 30000;
+
     interface Listener {
         void onOpen();
         void onText(String text);
@@ -88,8 +92,10 @@ final class WsClient {
         boolean secure = "wss".equalsIgnoreCase(uri.getScheme());
         int port = uri.getPort() > 0 ? uri.getPort() : (secure ? 443 : 80);
         socket = secure
-                ? SSLSocketFactory.getDefault().createSocket(uri.getHost(), port)
-                : new Socket(uri.getHost(), port);
+                ? SSLSocketFactory.getDefault().createSocket()
+                : new Socket();
+        socket.connect(new InetSocketAddress(uri.getHost(), port), CONNECT_TIMEOUT_MS);
+        socket.setSoTimeout(READ_TIMEOUT_MS);
         socket.setTcpNoDelay(true);
         socket.setKeepAlive(true);
         in = new BufferedInputStream(socket.getInputStream());

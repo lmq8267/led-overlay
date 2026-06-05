@@ -23,6 +23,7 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 public class LedService extends Service {
     private WsClient ws;
@@ -65,6 +66,10 @@ public class LedService extends Service {
         if (intent != null && Prefs.ACTION_STOP.equals(intent.getAction())) {
             stopSelf();
             return START_NOT_STICKY;
+        }
+        if (intent != null && Prefs.ACTION_CLEAN_IDLE_OVERLAY.equals(intent.getAction())) {
+            removeIdleOverlay();
+            return START_STICKY;
         }
         startClient();
         return START_STICKY;
@@ -190,9 +195,13 @@ public class LedService extends Service {
                 }
             });
             try {
-                latch.await();
+                if (!latch.await(3000, TimeUnit.MILLISECONDS)) {
+                    lastOverlayError = "等待主线程创建悬浮窗超时";
+                    return false;
+                }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
+                lastOverlayError = "等待主线程创建悬浮窗被中断";
             }
             return ok[0];
         }
@@ -526,6 +535,27 @@ public class LedService extends Service {
                 processDisplayQueue();
             }
         });
+    }
+
+    private void removeIdleOverlay() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            if (mainHandler != null) {
+                mainHandler.post(new Runnable() {
+                    @Override public void run() {
+                        removeIdleOverlay();
+                    }
+                });
+            }
+            return;
+        }
+        synchronized (displayQueue) {
+            if (displayingTaskId.length() > 0 || !displayQueue.isEmpty()) return;
+        }
+        if (overlay != null && overlay.isDisplaying()) return;
+        if (overlay == null) return;
+        try { windowManager.removeView(overlay); } catch (Exception ignored) {}
+        overlay = null;
+        LogStore.append(this, "已清理空闲悬浮窗");
     }
 
     private Notification notification() {

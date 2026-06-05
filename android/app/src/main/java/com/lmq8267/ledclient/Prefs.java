@@ -9,6 +9,7 @@ import java.util.UUID;
 final class Prefs {
     static final String ACTION_START = "com.lmq8267.ledclient.START";
     static final String ACTION_STOP = "com.lmq8267.ledclient.STOP";
+    static final String ACTION_CLEAN_IDLE_OVERLAY = "com.lmq8267.ledclient.CLEAN_IDLE_OVERLAY";
     static final String KEY_SERVER = "server";
     static final String KEY_SERVER_HISTORY = "server_history";
     static final String KEY_BOOT = "boot";
@@ -22,6 +23,7 @@ final class Prefs {
     static final String KEY_SEEN_TASKS = "seen_tasks";
     static final String KEY_PENDING_ACKS = "pending_acks";
     static final String KEY_PENDING_COMPLETED_ACKS = "pending_completed_acks";
+    static final String KEY_OVERLAY_CLEANUP_REQUEST = "overlay_cleanup_request";
 
     private Prefs() {}
 

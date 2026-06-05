@@ -1,6 +1,7 @@
 package com.lmq8267.ledclient;
 
 import android.app.Activity;
+import android.app.ActivityManager;
 import android.app.Dialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
@@ -22,6 +23,7 @@ import android.os.Looper;
 import android.os.PowerManager;
 import android.provider.Settings;
 import android.view.Gravity;
+import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
@@ -41,6 +43,7 @@ import android.widget.AutoCompleteTextView;
 import android.widget.AdapterView;
 
 import java.util.ArrayList;
+import java.util.List;
 
 public class MainActivity extends Activity {
 
@@ -103,7 +106,8 @@ public class MainActivity extends Activity {
         buildShell();
         load();
         renderHome();
-        requestStartupPermissions(false);
+        requestIdleOverlayCleanup();
+        if (requestStartupPermissions(false)) autoStartIfNeeded();
     }
 
     @Override
@@ -214,8 +218,34 @@ public class MainActivity extends Activity {
         headerShadow.setBackgroundColor(Color.argb(30, 0, 0, 0));
 
         scrollView = new ScrollView(this);
+        scrollView.setFocusable(true);
+        scrollView.setFocusableInTouchMode(false);
+        scrollView.setDescendantFocusability(ViewGroup.FOCUS_AFTER_DESCENDANTS);
         scrollView.setPadding(0, 0, 0, dp(12));
         scrollView.setClipToPadding(false);
+        scrollView.setOnKeyListener(new View.OnKeyListener() {
+            @Override public boolean onKey(View v, int keyCode, KeyEvent event) {
+                if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
+                int amount = Math.max(dp(96), scrollView.getHeight() / 3);
+                if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
+                    scrollView.smoothScrollBy(0, amount);
+                    return false;
+                }
+                if (keyCode == KeyEvent.KEYCODE_DPAD_UP) {
+                    scrollView.smoothScrollBy(0, -amount);
+                    return false;
+                }
+                if (keyCode == KeyEvent.KEYCODE_PAGE_DOWN) {
+                    scrollView.smoothScrollBy(0, scrollView.getHeight());
+                    return true;
+                }
+                if (keyCode == KeyEvent.KEYCODE_PAGE_UP) {
+                    scrollView.smoothScrollBy(0, -scrollView.getHeight());
+                    return true;
+                }
+                return false;
+            }
+        });
         scrollView.setOnTouchListener(new View.OnTouchListener() {
             @Override public boolean onTouch(View v, MotionEvent event) {
                 if (page == 1) {
@@ -266,6 +296,7 @@ public class MainActivity extends Activity {
         item.setGravity(Gravity.CENTER);
         item.setTextSize(14);
         item.setTypeface(Typeface.DEFAULT_BOLD);
+        makeFocusableAction(item);
         item.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
                 if (targetPage == 0 && page == 0) {
@@ -312,6 +343,10 @@ public class MainActivity extends Activity {
         GradientDrawable bg = new GradientDrawable();
         bg.setColor(selected ? COLOR_HEADER : Color.TRANSPARENT);
         bg.setCornerRadius(dp(12));
+        if (item.hasFocus()) {
+            bg.setColor(selected ? COLOR_HEADER : Color.rgb(239, 246, 255));
+            bg.setStroke(dp(2), COLOR_ACCENT);
+        }
         setBackgroundCompat(item, bg);
     }
 
@@ -423,6 +458,7 @@ public class MainActivity extends Activity {
         setBackgroundCompat(serverInput, inputBorder);
         serverInput.setOnFocusChangeListener(new View.OnFocusChangeListener() {
             @Override public void onFocusChange(View v, boolean hasFocus) {
+                applyInputFocusStyle(serverInput, hasFocus);
                 if (hasFocus) {
                     refreshServerSuggestions();
                     serverInput.showDropDown();
@@ -465,8 +501,15 @@ public class MainActivity extends Activity {
                 if (!suppressBootChange) setBootStart(checked);
             }
         });
+        bootSwitch.setFocusable(false);
         bootRow.addView(bootLabel, new LinearLayout.LayoutParams(0, -2, 1));
         bootRow.addView(bootSwitch, new LinearLayout.LayoutParams(-2, -2));
+        makeFocusableAction(bootRow);
+        bootRow.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                bootSwitch.setChecked(!bootSwitch.isChecked());
+            }
+        });
         card.addView(bootRow, fullWidth(-2, -2));
 
         card.addView(spacer(dp(4)));
@@ -478,6 +521,7 @@ public class MainActivity extends Activity {
         runButton.setTypeface(Typeface.DEFAULT_BOLD);
         runButton.setPadding(0, dp(14), 0, dp(14));
         runButton.setOnTouchListener(buttonTouch);
+        makeFocusableAction(runButton);
         runButton.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
                 save();
@@ -496,6 +540,7 @@ public class MainActivity extends Activity {
         LinearLayout card = cardContainer();
 
         View historyTitle = sectionTitle(getString(R.string.history_messages), getString(R.string.history_messages_desc));
+        makeFocusableAction(historyTitle);
         historyTitle.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
                 confirmClearHistory();
@@ -526,6 +571,7 @@ public class MainActivity extends Activity {
                 itemBg.setCornerRadius(dp(10));
                 itemBg.setStroke(dp(1), row % 2 == 0 ? Color.rgb(226, 232, 240) : Color.rgb(191, 219, 254));
                 setBackgroundCompat(item, itemBg);
+                makeFocusablePanel(item);
 
                 LinearLayout metaRow = new LinearLayout(this);
                 metaRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -640,6 +686,7 @@ public class MainActivity extends Activity {
             int width = Math.min(getResources().getDisplayMetrics().widthPixels - dp(32), dp(360));
             window.setLayout(width, -2);
         }
+        cancel.requestFocus();
     }
 
     // ═══════════════════════════════════════════════════════
@@ -761,6 +808,7 @@ public class MainActivity extends Activity {
         bg.setCornerRadius(dp(8));
         bg.setStroke(dp(1), (row % 2 == 0) ? Color.rgb(226, 232, 240) : Color.rgb(191, 219, 254));
         setBackgroundCompat(tv, bg);
+        makeFocusablePanel(tv);
         return tv;
     }
 
@@ -903,6 +951,7 @@ public class MainActivity extends Activity {
             codeBg.setStroke(dp(1), Color.rgb(226, 232, 240));
             codeBg.setCornerRadius(dp(10));
             setBackgroundCompat(codeView, codeBg);
+            makeFocusablePanel(codeView);
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
             if (i < cmds.length - 1) lp.bottomMargin = dp(6);
             card.addView(codeView, lp);
@@ -980,7 +1029,7 @@ public class MainActivity extends Activity {
         right.setTypeface(Typeface.DEFAULT_BOLD);
         if (link) {
             right.setTextColor(COLOR_ACCENT);
-            right.setOnClickListener(new View.OnClickListener() {
+            View.OnClickListener openRepo = new View.OnClickListener() {
                 @Override public void onClick(View v) {
                     try {
                         startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/lmq8267/led-overlay")));
@@ -988,7 +1037,9 @@ public class MainActivity extends Activity {
                         showTip(getString(R.string.toast_open_settings_failed, getString(R.string.menu_about)), false);
                     }
                 }
-            });
+            };
+            makeFocusableAction(row);
+            row.setOnClickListener(openRepo);
         }
 
         row.addView(left, new LinearLayout.LayoutParams(0, -2, 1));
@@ -1005,7 +1056,8 @@ public class MainActivity extends Activity {
     private LinearLayout permissionRowWithDivider(String label, String value, boolean ok, View.OnClickListener listener) {
         LinearLayout container = new LinearLayout(this);
         container.setOrientation(LinearLayout.VERTICAL);
-        container.addView(permissionRow(label, value, ok, listener), new LinearLayout.LayoutParams(-1, -2));
+        View row = permissionRow(label, value, ok, listener);
+        container.addView(row, new LinearLayout.LayoutParams(-1, -2));
         View divider = new View(this);
         divider.setBackgroundColor(COLOR_BORDER);
         container.addView(divider, new LinearLayout.LayoutParams(-1, dp(1)));
@@ -1030,8 +1082,9 @@ public class MainActivity extends Activity {
         right.setGravity(Gravity.END);
         right.setTypeface(Typeface.DEFAULT_BOLD);
         if (listener != null) {
-            right.setOnClickListener(listener);
             right.setPadding(dp(10), dp(6), 0, dp(6));
+            makeFocusableAction(row);
+            row.setOnClickListener(listener);
         }
 
         row.addView(left, new LinearLayout.LayoutParams(0, -2, 1));
@@ -1096,6 +1149,50 @@ public class MainActivity extends Activity {
         saveServerSettings(true);
     }
 
+    private void autoStartIfNeeded() {
+        if (Prefs.server(this).trim().length() == 0) return;
+        if (isClientActiveEnough()) return;
+        startClient(false);
+    }
+
+    private void requestIdleOverlayCleanup() {
+        if (isTv()) {
+            Prefs.store(this).edit()
+                    .putLong(Prefs.KEY_OVERLAY_CLEANUP_REQUEST, System.currentTimeMillis())
+                    .apply();
+            return;
+        }
+        if (isServiceRunning(LedService.class.getName())) {
+            Intent intent = new Intent(this, LedService.class);
+            intent.setAction(Prefs.ACTION_CLEAN_IDLE_OVERLAY);
+            startService(intent);
+        }
+    }
+
+    private boolean isClientActiveEnough() {
+        String state = Prefs.connectionState(this);
+        boolean connectedOrConnecting = Prefs.CONNECTION_CONNECTED.equals(state)
+                || Prefs.CONNECTION_CONNECTING.equals(state);
+        if (isTv()) {
+            return Prefs.running(this) && isAccessibilityServiceEnabled() && connectedOrConnecting;
+        }
+        return Prefs.running(this) && isServiceRunning(LedService.class.getName()) && connectedOrConnecting;
+    }
+
+    private boolean isServiceRunning(String serviceName) {
+        ActivityManager am = (ActivityManager) getSystemService(ACTIVITY_SERVICE);
+        if (am == null) return false;
+        List<ActivityManager.RunningServiceInfo> services = am.getRunningServices(Integer.MAX_VALUE);
+        if (services == null) return false;
+        for (int i = 0; i < services.size(); i++) {
+            ActivityManager.RunningServiceInfo info = services.get(i);
+            if (info != null && info.service != null && serviceName.equals(info.service.getClassName())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private void saveServerSettings(boolean restartIfRunning) {
         if (serverInput == null) return;
         String previous = Prefs.server(this);
@@ -1139,7 +1236,7 @@ public class MainActivity extends Activity {
         if (isTv()) {
             if (!isAccessibilityServiceEnabled()) {
                 if (showToast) showTip(getString(R.string.accessibility_permission), false);
-                openAccessibilitySettings();
+                if (showToast) openAccessibilitySettings();
                 return;
             }
             boolean wasRunning = Prefs.running(this);
@@ -1155,7 +1252,7 @@ public class MainActivity extends Activity {
             if (showToast) showTip(getString(R.string.toast_started), true);
             return;
         }
-        if (!requestStartupPermissions(true)) return;
+        if (!requestStartupPermissions(showToast)) return;
         boolean wasRunning = Prefs.running(this);
         Intent intent = new Intent(this, LedService.class);
         intent.setAction(Prefs.ACTION_START);
@@ -1230,7 +1327,10 @@ public class MainActivity extends Activity {
     private void updateRunButton(boolean running) {
         if (runButton == null) return;
         runButton.setText(running ? getString(R.string.stop) : getString(R.string.start));
-        setRoundedBg(runButton, running ? COLOR_RED : COLOR_GREEN, dp(12));
+        int color = running ? COLOR_RED : COLOR_GREEN;
+        runButton.setTag(Integer.valueOf(color));
+        setRoundedBg(runButton, color, dp(12));
+        if (runButton.hasFocus()) applyActionFocusStyle(runButton, true);
     }
 
     private void updateStatus(boolean running) {
@@ -1406,7 +1506,9 @@ public class MainActivity extends Activity {
         button.setTypeface(Typeface.DEFAULT_BOLD);
         button.setPadding(0, 0, 0, 0);
         setRoundedBg(button, color, dp(9));
+        button.setTag(Integer.valueOf(color));
         button.setOnTouchListener(buttonTouch);
+        makeFocusableAction(button);
         return button;
     }
 
@@ -1465,6 +1567,76 @@ public class MainActivity extends Activity {
         toast.setGravity(Gravity.CENTER, 0, 0);
         toast.setDuration(Toast.LENGTH_SHORT);
         toast.show();
+    }
+
+    private void makeFocusableAction(final View view) {
+        view.setFocusable(true);
+        view.setFocusableInTouchMode(false);
+        view.setOnKeyListener(new View.OnKeyListener() {
+            @Override public boolean onKey(View v, int keyCode, KeyEvent event) {
+                if (event.getAction() == KeyEvent.ACTION_UP && isConfirmKey(keyCode)) {
+                    v.performClick();
+                    return true;
+                }
+                return false;
+            }
+        });
+        view.setOnFocusChangeListener(new View.OnFocusChangeListener() {
+            @Override public void onFocusChange(View v, boolean hasFocus) {
+                if (v == navHome || v == navLogs || v == navAbout) {
+                    updateNavigation();
+                } else {
+                    applyActionFocusStyle(v, hasFocus);
+                }
+            }
+        });
+    }
+
+    private void makeFocusablePanel(final View view) {
+        view.setFocusable(true);
+        view.setFocusableInTouchMode(false);
+        view.setOnFocusChangeListener(new View.OnFocusChangeListener() {
+            @Override public void onFocusChange(View v, boolean hasFocus) {
+                GradientDrawable bg = new GradientDrawable();
+                bg.setColor(hasFocus ? Color.rgb(239, 246, 255) : Color.rgb(248, 250, 252));
+                bg.setStroke(dp(hasFocus ? 2 : 1), hasFocus ? COLOR_ACCENT : Color.rgb(226, 232, 240));
+                bg.setCornerRadius(dp(10));
+                setBackgroundCompat(v, bg);
+            }
+        });
+    }
+
+    private void applyActionFocusStyle(View view, boolean focused) {
+        Object tag = view.getTag();
+        if (tag instanceof Integer) {
+            GradientDrawable bg = new GradientDrawable();
+            bg.setColor(((Integer) tag).intValue());
+            bg.setCornerRadius(dp(view == runButton ? 12 : 9));
+            if (focused) bg.setStroke(dp(3), Color.WHITE);
+            setBackgroundCompat(view, bg);
+        } else {
+            GradientDrawable bg = new GradientDrawable();
+            bg.setColor(focused ? Color.rgb(239, 246, 255) : Color.TRANSPARENT);
+            bg.setStroke(focused ? dp(2) : 0, focused ? COLOR_ACCENT : Color.TRANSPARENT);
+            bg.setCornerRadius(dp(10));
+            setBackgroundCompat(view, bg);
+        }
+        view.animate().scaleX(focused ? 1.015f : 1f).scaleY(focused ? 1.015f : 1f)
+                .setDuration(120).start();
+    }
+
+    private void applyInputFocusStyle(View view, boolean focused) {
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(COLOR_INPUT_BG);
+        bg.setStroke(dp(focused ? 2 : 1), focused ? COLOR_ACCENT : Color.rgb(203, 213, 225));
+        bg.setCornerRadius(dp(12));
+        setBackgroundCompat(view, bg);
+    }
+
+    private boolean isConfirmKey(int keyCode) {
+        return keyCode == KeyEvent.KEYCODE_DPAD_CENTER
+                || keyCode == KeyEvent.KEYCODE_ENTER
+                || keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER;
     }
 
     // ── 按钮触摸反馈 ──

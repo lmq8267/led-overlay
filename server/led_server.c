@@ -14,6 +14,7 @@
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <syslog.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -212,6 +213,8 @@ static void print_help(const char *prog) {
         "  -a <地址>              监听地址，默认 0.0.0.0\n"
         "  -p <端口>              监听端口，默认 12366\n"
         "  --home-path <路径>     管理主页隐藏路径，默认 /\n"
+        "  -P, --default-password <密码>\n"
+        "                         状态文件缺失或无密码时使用的默认密码，默认 admin\n"
         "  --reset-password <密码> 重置管理密码后退出\n"
         "  -v, --version          输出版本号后退出\n"
         "  -h, --help             输出本帮助后退出\n"
@@ -224,22 +227,34 @@ static void log_line(const char *fmt, ...) {
     va_list ap;
     time_t now = time(NULL);
     char ts[32];
+    char msg[1024];
     strftime(ts, sizeof(ts), "%F %T", localtime(&now));
-    fprintf(stderr, "[%s] ", ts);
     va_start(ap, fmt);
-    vfprintf(stderr, fmt, ap);
+    vsnprintf(msg, sizeof(msg), fmt, ap);
     va_end(ap);
+    fprintf(stderr, "[%s] ", ts);
+    fputs(msg, stderr);
     fputc('\n', stderr);
+    syslog(LOG_INFO, "%s", msg);
 }
 
 static void add_event_locked(const char *fmt, ...) {
     va_list ap;
     time_t now = time(NULL);
     LogEntry *entry = calloc(1, sizeof(LogEntry));
-    strftime(entry->time, sizeof(entry->time), "%F %T", localtime(&now));
+    char text[512];
     va_start(ap, fmt);
-    vsnprintf(entry->text, sizeof(entry->text), fmt, ap);
+    vsnprintf(text, sizeof(text), fmt, ap);
     va_end(ap);
+    syslog(LOG_INFO, "%s", text);
+    if (!entry) {
+        char ts[32];
+        strftime(ts, sizeof(ts), "%F %T", localtime(&now));
+        fprintf(stderr, "[%s] %s\n", ts, text);
+        return;
+    }
+    strftime(entry->time, sizeof(entry->time), "%F %T", localtime(&now));
+    snprintf(entry->text, sizeof(entry->text), "%s", text);
     fprintf(stderr, "[%s] %s\n", entry->time, entry->text);
     if (!logs) logs = entry;
     else {
@@ -391,6 +406,14 @@ static int ws_read(int fd, char *out, size_t cap) {
     }
     out[keep] = 0;
     return opcode == 1;
+}
+
+static void set_socket_timeouts(int fd) {
+    struct timeval tv;
+    tv.tv_sec = 30;
+    tv.tv_usec = 0;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 }
 
 /* ── JSON 辅助 ─────────────────────────────────────────── */
@@ -1563,10 +1586,12 @@ static int listen_socket(const char *addr, const char *port, int family) {
    main
    ═══════════════════════════════════════════════════════════ */
 int main(int argc, char **argv) {
+    openlog("【LED悬浮消息】", LOG_PID, LOG_USER);
     const char *addr = "0.0.0.0";
     const char *port = "12366";
     int reset_pw = 0;
     const char *new_password = NULL;
+    const char *default_password = "admin";
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -1587,6 +1612,16 @@ int main(int argc, char **argv) {
                 return 2;
             }
             port = argv[++i];
+        } else if (strcmp(argv[i], "-P") == 0 || strcmp(argv[i], "--default-password") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "参数 %s 缺少默认密码。\n", argv[i]);
+                return 2;
+            }
+            default_password = argv[++i];
+            if (!default_password[0]) {
+                fprintf(stderr, "默认密码不能为空。\n");
+                return 2;
+            }
         } else if (strcmp(argv[i], "--reset-password") == 0) {
             if (i + 1 >= argc) {
                 fprintf(stderr, "参数 --reset-password 缺少新密码。\n");
@@ -1624,10 +1659,10 @@ int main(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN);
     load_state();
 
-    /* ── 若无存储密码，设置默认密码 admin ── */
+    /* ── 若状态文件缺失、异常或无存储密码，使用启动参数指定的默认密码 ── */
     if (!password_hash[0]) {
-        sha1_hex("admin", password_hash, sizeof(password_hash));
-        log_line("主页默认登录密码（admin）请及时修改！");
+        sha1_hex(default_password, password_hash, sizeof(password_hash));
+        log_line("主页默认登录密码已启用，请及时修改！");
     }
 
     /* 确保默认密码被持久化 */
@@ -1660,8 +1695,17 @@ int main(int argc, char **argv) {
         for (int i = 0; i < count; i++) if (FD_ISSET(fds[i], &set)) {
             int cfd = accept(fds[i], NULL, NULL);
             if (cfd < 0) continue;
-            int *arg = malloc(sizeof(int)); *arg = cfd;
-            pthread_t tid; pthread_create(&tid, NULL, connection_thread, arg); pthread_detach(tid);
+            set_socket_timeouts(cfd);
+            int *arg = malloc(sizeof(int));
+            if (!arg) { close(cfd); continue; }
+            *arg = cfd;
+            pthread_t tid;
+            if (pthread_create(&tid, NULL, connection_thread, arg) != 0) {
+                close(cfd);
+                free(arg);
+                continue;
+            }
+            pthread_detach(tid);
         }
     }
 }

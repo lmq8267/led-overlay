@@ -36,7 +36,9 @@ public class LedAccessibilityService extends AccessibilityService {
     private final SharedPreferences.OnSharedPreferenceChangeListener prefsListener =
             new SharedPreferences.OnSharedPreferenceChangeListener() {
         @Override public void onSharedPreferenceChanged(SharedPreferences prefs, String key) {
-            if (Prefs.KEY_RUNNING.equals(key) || Prefs.KEY_SERVER.equals(key)) {
+            if (Prefs.KEY_OVERLAY_CLEANUP_REQUEST.equals(key)) {
+                removeIdleOverlay();
+            } else if (Prefs.KEY_RUNNING.equals(key) || Prefs.KEY_SERVER.equals(key)) {
                 if (Prefs.running(LedAccessibilityService.this)) {
                     startClient();
                     if (mainHandler != null) {
@@ -262,6 +264,22 @@ public class LedAccessibilityService extends AccessibilityService {
         if (overlay == null) return;
         try { windowManager.removeView(overlay); } catch (Exception ignored) {}
         overlay = null;
+    }
+
+    private void removeIdleOverlay() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            if (mainHandler != null) {
+                mainHandler.post(new Runnable() {
+                    @Override public void run() {
+                        removeIdleOverlay();
+                    }
+                });
+            }
+            return;
+        }
+        if (overlay == null || overlay.isDisplaying()) return;
+        removeOverlay();
+        LogStore.append(this, "已清理空闲无障碍悬浮窗");
     }
 
     // ═══════════════════════════════════════════════════════

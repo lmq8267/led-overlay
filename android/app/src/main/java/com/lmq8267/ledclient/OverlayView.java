@@ -81,6 +81,10 @@ final class OverlayView extends View {
         return true;
     }
 
+    boolean isDisplaying() {
+        return message != null;
+    }
+
     @Override
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
