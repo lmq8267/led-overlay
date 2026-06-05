@@ -72,19 +72,28 @@ echo.
 echo 检查无障碍服务是否已开启...
 set ACCESSIBILITY_SERVICE=com.lmq8267.ledclient/.LedAccessibilityService
 set CURRENT_SERVICES=
+set SERVICE_CRASHED=0
 for /f "delims=" %%i in ('adb -s %ADB_IP%:%ADB_PORT% shell settings get secure enabled_accessibility_services 2^>nul') do set CURRENT_SERVICES=%%i
 set CURRENT_SERVICES=!CURRENT_SERVICES:=!
+adb -s %ADB_IP%:%ADB_PORT% shell dumpsys accessibility 2^>nul | findstr /c:"Crashed services" | findstr /c:"com.lmq8267.ledclient" >nul
+if !ERRORLEVEL! equ 0 set SERVICE_CRASHED=1
 echo !CURRENT_SERVICES! | findstr /c:"!ACCESSIBILITY_SERVICE!" >nul
 if !ERRORLEVEL! equ 0 (
+    if "!SERVICE_CRASHED!"=="1" (
+        echo     已开启，但系统标记该无障碍服务已崩溃，将刷新本应用绑定
+        echo.
+    ) else (
     echo.
     echo ╔══════════════════════════════════════════╗
     echo ║   [OK] 无障碍服务已经开启，无需重复开启   ║
     echo ╚══════════════════════════════════════════╝
     pause
     exit /b 0
+    )
+) else (
+    echo     未开启，将继续授权
+    echo.
 )
-echo     未开启，将继续授权
-echo.
 
 :: ── 确认 ──
 echo ╔══════════════════════════════════════════╗
@@ -121,6 +130,14 @@ echo.
 echo [6/6] 开启无障碍服务（后台保活）...
 for /f "delims=" %%i in ('adb -s %ADB_IP%:%ADB_PORT% shell settings get secure enabled_accessibility_services 2^>nul') do set OLD_SERVICES=%%i
 set OLD_SERVICES=!OLD_SERVICES:=!
+if "!SERVICE_CRASHED!"=="1" (
+    set REMOVE_SERVICES=!OLD_SERVICES:%ACCESSIBILITY_SERVICE%:=!
+    set REMOVE_SERVICES=!REMOVE_SERVICES::%ACCESSIBILITY_SERVICE%=!
+    if "!REMOVE_SERVICES!"=="!ACCESSIBILITY_SERVICE!" set REMOVE_SERVICES=
+    adb -s %ADB_IP%:%ADB_PORT% shell settings put secure enabled_accessibility_services "!REMOVE_SERVICES!"
+    ping -n 2 127.0.0.1 >nul
+    set OLD_SERVICES=!REMOVE_SERVICES!
+)
 if "!OLD_SERVICES!"=="null" set OLD_SERVICES=
 if "!OLD_SERVICES!"=="" (
     set NEW_SERVICES=!ACCESSIBILITY_SERVICE!

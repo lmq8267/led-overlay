@@ -197,6 +197,8 @@ public class LedAccessibilityService extends AccessibilityService {
     private void receiveMessage(final LedMessage message) {
         // 收到消息立即回复"received"，服务器显示"待接收"
         sendAckReliable(message.taskId, "received", "客户端已收到消息");
+        Prefs.markTaskSeen(this, message.taskId);
+        MessageHistory.append(this, message);
 
         mainHandler.post(new Runnable() {
             @Override public void run() {
@@ -216,6 +218,7 @@ public class LedAccessibilityService extends AccessibilityService {
                     try {
                         windowManager.addView(overlay, lp);
                     } catch (Exception e) {
+                        overlay = null;
                         LogStore.append(LedAccessibilityService.this,
                                 "Accessibility overlay failed: " + e.getMessage());
                         sendAckReliable(message.taskId, "failed", "悬浮窗创建失败：" + e.getMessage());
@@ -229,6 +232,7 @@ public class LedAccessibilityService extends AccessibilityService {
                         Prefs.markTaskDone(LedAccessibilityService.this, taskId);
                         // 显示完成 → 回复"completed"，服务器显示"已完成"
                         sendAckReliable(taskId, "completed", "无障碍显示完成");
+                        removeOverlay();
                     }
                 });
             }
@@ -239,9 +243,25 @@ public class LedAccessibilityService extends AccessibilityService {
         if (overlay == null) return;
         overlay.post(new Runnable() {
             @Override public void run() {
-                overlay.cancel(taskId);
+                if (overlay != null && overlay.cancel(taskId)) removeOverlay();
             }
         });
+    }
+
+    private void removeOverlay() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            if (mainHandler != null) {
+                mainHandler.post(new Runnable() {
+                    @Override public void run() {
+                        removeOverlay();
+                    }
+                });
+            }
+            return;
+        }
+        if (overlay == null) return;
+        try { windowManager.removeView(overlay); } catch (Exception ignored) {}
+        overlay = null;
     }
 
     // ═══════════════════════════════════════════════════════

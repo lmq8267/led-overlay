@@ -72,12 +72,13 @@ final class OverlayView extends View {
         invalidate();
     }
 
-    void cancel(String taskId) {
-        if (message == null || !message.taskId.equals(taskId)) return;
+    boolean cancel(String taskId) {
+        if (message == null || !message.taskId.equals(taskId)) return false;
         message = null;
         handler.removeCallbacks(tick);
         setVisibility(INVISIBLE);
         invalidate();
+        return true;
     }
 
     @Override
