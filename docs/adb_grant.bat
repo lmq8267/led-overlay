@@ -1,4 +1,5 @@
 @echo off
+setlocal EnableDelayedExpansion
 chcp 65001 >nul
 title LED悬浮屏 - ADB 一键授权
 color 0f
@@ -67,6 +68,24 @@ if %ERRORLEVEL% neq 0 (
 echo     [OK] 已授权
 echo.
 
+:: ── 已开启则直接退出 ──
+echo 检查无障碍服务是否已开启...
+set ACCESSIBILITY_SERVICE=com.lmq8267.ledclient/.LedAccessibilityService
+set CURRENT_SERVICES=
+for /f "delims=" %%i in ('adb -s %ADB_IP%:%ADB_PORT% shell settings get secure enabled_accessibility_services 2^>nul') do set CURRENT_SERVICES=%%i
+set CURRENT_SERVICES=!CURRENT_SERVICES:=!
+echo !CURRENT_SERVICES! | findstr /c:"!ACCESSIBILITY_SERVICE!" >nul
+if !ERRORLEVEL! equ 0 (
+    echo.
+    echo ╔══════════════════════════════════════════╗
+    echo ║   [OK] 无障碍服务已经开启，无需重复开启   ║
+    echo ╚══════════════════════════════════════════╝
+    pause
+    exit /b 0
+)
+echo     未开启，将继续授权
+echo.
+
 :: ── 确认 ──
 echo ╔══════════════════════════════════════════╗
 echo ║  即将执行以下操作：                       ║
@@ -100,7 +119,20 @@ echo    [OK] RUN_ANY_IN_BACKGROUND = allow
 echo.
 
 echo [6/6] 开启无障碍服务（后台保活）...
-adb -s %ADB_IP%:%ADB_PORT% shell settings put secure enabled_accessibility_services com.lmq8267.ledclient/.LedAccessibilityService
+for /f "delims=" %%i in ('adb -s %ADB_IP%:%ADB_PORT% shell settings get secure enabled_accessibility_services 2^>nul') do set OLD_SERVICES=%%i
+set OLD_SERVICES=!OLD_SERVICES:=!
+if "!OLD_SERVICES!"=="null" set OLD_SERVICES=
+if "!OLD_SERVICES!"=="" (
+    set NEW_SERVICES=!ACCESSIBILITY_SERVICE!
+) else (
+    echo !OLD_SERVICES! | findstr /c:"!ACCESSIBILITY_SERVICE!" >nul
+    if !ERRORLEVEL! equ 0 (
+        set NEW_SERVICES=!OLD_SERVICES!
+    ) else (
+        set NEW_SERVICES=!OLD_SERVICES!:!ACCESSIBILITY_SERVICE!
+    )
+)
+adb -s %ADB_IP%:%ADB_PORT% shell settings put secure enabled_accessibility_services "!NEW_SERVICES!"
 adb -s %ADB_IP%:%ADB_PORT% shell settings put secure accessibility_enabled 1
 echo    [OK] 无障碍服务已开启
 echo.

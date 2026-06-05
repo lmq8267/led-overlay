@@ -1,6 +1,7 @@
 package com.lmq8267.ledclient;
 
 import android.accessibilityservice.AccessibilityService;
+import android.content.SharedPreferences;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
@@ -32,6 +33,23 @@ public class LedAccessibilityService extends AccessibilityService {
     private String currentServer = "";
     private Handler mainHandler;
     private String lastHttpAckError = "";
+    private final SharedPreferences.OnSharedPreferenceChangeListener prefsListener =
+            new SharedPreferences.OnSharedPreferenceChangeListener() {
+        @Override public void onSharedPreferenceChanged(SharedPreferences prefs, String key) {
+            if (Prefs.KEY_RUNNING.equals(key) || Prefs.KEY_SERVER.equals(key)) {
+                if (Prefs.running(LedAccessibilityService.this)) {
+                    startClient();
+                    if (mainHandler != null) {
+                        mainHandler.removeCallbacks(pendingAckFlusher);
+                        mainHandler.postDelayed(pendingAckFlusher, 5000);
+                    }
+                } else {
+                    if (mainHandler != null) mainHandler.removeCallbacks(pendingAckFlusher);
+                    stopClient();
+                }
+            }
+        }
+    };
     private final ArrayList<String> completedAckRetries = new ArrayList<String>();
     private final Runnable pendingAckFlusher = new Runnable() {
         @Override public void run() {
@@ -65,36 +83,46 @@ public class LedAccessibilityService extends AccessibilityService {
         } else {
             windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
         }
-        startClient();
-        mainHandler.postDelayed(pendingAckFlusher, 5000);
+        Prefs.store(this).registerOnSharedPreferenceChangeListener(prefsListener);
+        if (Prefs.running(this)) {
+            startClient();
+            mainHandler.postDelayed(pendingAckFlusher, 5000);
+        }
     }
 
     @Override
     public void onDestroy() {
+        Prefs.store(this).unregisterOnSharedPreferenceChangeListener(prefsListener);
         if (mainHandler != null) mainHandler.removeCallbacks(pendingAckFlusher);
-        if (ws != null) ws.stop();
-        if (overlay != null) {
-            try { windowManager.removeView(overlay); } catch (Exception ignored) {}
-        }
+        stopClient();
         super.onDestroy();
     }
 
     private void startClient() {
         final String server = Prefs.server(this);
-        if (server.trim().length() == 0) return;
+        if (server.trim().length() == 0) {
+            Prefs.setConnectionState(this, Prefs.CONNECTION_DISCONNECTED);
+            return;
+        }
 
         final String target = WsClient.normalize(server);
         if (thread != null && thread.isAlive()) {
-            if (server.equals(currentServer)) return;
+            if (server.equals(currentServer)) {
+                Prefs.setConnectionState(this,
+                        ws != null && ws.isOpen() ? Prefs.CONNECTION_CONNECTED : Prefs.CONNECTION_CONNECTING);
+                return;
+            }
             if (ws != null) ws.stop();
             thread = null;
         }
         currentServer = server;
+        Prefs.setConnectionState(this, Prefs.CONNECTION_CONNECTING);
         LogStore.append(this, getString(R.string.log_connecting, target));
 
         final WsClient[] clientRef = new WsClient[1];
         final WsClient client = new WsClient(server, new WsClient.Listener() {
             @Override public void onOpen() {
+                Prefs.setConnectionState(LedAccessibilityService.this, Prefs.CONNECTION_CONNECTED);
                 LogStore.append(LedAccessibilityService.this, getString(R.string.log_connected, target));
                 JSONObject hello = new JSONObject();
                 try {
@@ -107,6 +135,7 @@ public class LedAccessibilityService extends AccessibilityService {
             }
 
             @Override public void onText(String text) {
+                Prefs.setConnectionState(LedAccessibilityService.this, Prefs.CONNECTION_CONNECTED);
                 LogStore.append(LedAccessibilityService.this, getString(R.string.log_message, text));
                 try {
                     JSONObject json = new JSONObject(text);
@@ -130,6 +159,10 @@ public class LedAccessibilityService extends AccessibilityService {
             }
 
             @Override public void onClosed(Exception error) {
+                Prefs.setConnectionState(LedAccessibilityService.this,
+                        Prefs.running(LedAccessibilityService.this)
+                                ? Prefs.CONNECTION_CONNECTING
+                                : Prefs.CONNECTION_DISCONNECTED);
                 String reason = error == null || error.getMessage() == null
                         ? "connection closed" : error.getMessage();
                 LogStore.append(LedAccessibilityService.this,
@@ -146,6 +179,21 @@ public class LedAccessibilityService extends AccessibilityService {
         thread.start();
     }
 
+    private void stopClient() {
+        currentServer = "";
+        if (ws != null) {
+            ws.stop();
+            ws = null;
+        }
+        thread = null;
+        if (overlay != null) {
+            try { windowManager.removeView(overlay); } catch (Exception ignored) {}
+            overlay = null;
+        }
+        Prefs.setConnectionState(this,
+                Prefs.running(this) ? Prefs.CONNECTION_CONNECTING : Prefs.CONNECTION_DISCONNECTED);
+    }
+
     private void receiveMessage(final LedMessage message) {
         // 收到消息立即回复"received"，服务器显示"待接收"
         sendAckReliable(message.taskId, "received", "客户端已收到消息");
@@ -154,9 +202,9 @@ public class LedAccessibilityService extends AccessibilityService {
             @Override public void run() {
                 if (overlay == null) {
                     overlay = new OverlayView(LedAccessibilityService.this);
-                    int windowType = Build.VERSION.SDK_INT >= 30
+                    int windowType = Build.VERSION.SDK_INT >= 22
                             ? WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
-                            : WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY;
+                            : WindowManager.LayoutParams.TYPE_PHONE;
                     WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
                             WindowManager.LayoutParams.MATCH_PARENT,
                             (int) (getResources().getDisplayMetrics().heightPixels * 0.12f),
@@ -219,26 +267,23 @@ public class LedAccessibilityService extends AccessibilityService {
     private void sendAckReliable(String taskId, String status, String detail) {
         if ("completed".equals(status)) {
             Prefs.addPendingCompletedAck(this, taskId);
+            sendAck(taskId, status, detail);
             sendCompletedAckHttp(taskId, detail);
             scheduleCompletedAckRetry(taskId, detail);
             return;
         }
-        boolean sent = sendAck(taskId, status, detail);
-        if (sent) {
-            Prefs.removePendingAck(this, taskId, status);
-        } else {
-            sendAckHttp(taskId, status, detail);
-            scheduleAckRetry(taskId, status, detail);
-            Prefs.addPendingAck(this, taskId, status);
-            LogStore.append(this, status + " ACK 发送失败，等待补发：" + taskId);
-        }
+        Prefs.addPendingAck(this, taskId, status);
+        sendAck(taskId, status, detail);
+        sendAckHttpAsync(taskId, status, detail);
+        scheduleAckRetry(taskId, status, detail);
     }
 
     private void scheduleCompletedAckRetry(final String taskId, final String detail) {
         if (taskId == null || taskId.length() == 0 || mainHandler == null) return;
+        final String retryKey = "completed:" + taskId;
         synchronized (completedAckRetries) {
-            if (completedAckRetries.contains(taskId)) return;
-            completedAckRetries.add(taskId);
+            if (completedAckRetries.contains(retryKey)) return;
+            completedAckRetries.add(retryKey);
         }
         mainHandler.postDelayed(new Runnable() {
             @Override public void run() {
@@ -253,7 +298,7 @@ public class LedAccessibilityService extends AccessibilityService {
                     sendCompletedAckHttp(taskId, detail);
                 }
                 synchronized (completedAckRetries) {
-                    completedAckRetries.remove(taskId);
+                    completedAckRetries.remove(retryKey);
                 }
             }
         }, 3000);
@@ -266,24 +311,21 @@ public class LedAccessibilityService extends AccessibilityService {
     /** 通用 ACK HTTP 重试（received/displaying/failed 等非 completed 状态） */
     private void scheduleAckRetry(final String taskId, final String status, final String detail) {
         if (taskId == null || taskId.length() == 0 || mainHandler == null) return;
+        final String retryKey = status + ":" + taskId;
         synchronized (completedAckRetries) {
-            if (completedAckRetries.contains(taskId)) return;
-            completedAckRetries.add(taskId);
+            if (completedAckRetries.contains(retryKey)) return;
+            completedAckRetries.add(retryKey);
         }
         mainHandler.postDelayed(new Runnable() {
             @Override public void run() {
-                if (shouldRetryAck(taskId, status)) {
-                    sendAckHttp(taskId, status, detail);
-                }
+                if (shouldRetryAck(taskId, status)) sendAckHttpAsync(taskId, status, detail);
             }
         }, 1000);
         mainHandler.postDelayed(new Runnable() {
             @Override public void run() {
-                if (shouldRetryAck(taskId, status)) {
-                    sendAckHttp(taskId, status, detail);
-                }
+                if (shouldRetryAck(taskId, status)) sendAckHttpAsync(taskId, status, detail);
                 synchronized (completedAckRetries) {
-                    completedAckRetries.remove(taskId);
+                    completedAckRetries.remove(retryKey);
                 }
             }
         }, 3000);
@@ -292,6 +334,24 @@ public class LedAccessibilityService extends AccessibilityService {
     private boolean shouldRetryAck(String taskId, String status) {
         String pending = Prefs.pendingAcks(this);
         return pending.contains("|" + status + ":" + taskId + "|");
+    }
+
+    private void sendAckHttpAsync(final String taskId, final String status, final String detail) {
+        if (taskId == null || taskId.length() == 0) return;
+        new Thread(new Runnable() {
+            @Override public void run() {
+                boolean ok = sendAckHttp(taskId, status, detail == null ? "" : detail);
+                if (ok) {
+                    Prefs.removePendingAck(LedAccessibilityService.this, taskId, status);
+                    LogStore.append(LedAccessibilityService.this,
+                            status + " ACK HTTP 状态已上报：" + taskId);
+                } else {
+                    LogStore.append(LedAccessibilityService.this,
+                            status + " ACK HTTP 失败，等待补发：" + taskId
+                            + (lastHttpAckError.length() == 0 ? "" : "，" + lastHttpAckError));
+                }
+            }
+        }, "led-a11y-ack-http-" + status).start();
     }
 
     private void sendCompletedAckHttp(final String taskId, final String detail) {
@@ -367,11 +427,7 @@ public class LedAccessibilityService extends AccessibilityService {
                 if (sep > 0 && sep + 1 < entries[i].length()) {
                     String status = entries[i].substring(0, sep);
                     String taskId = entries[i].substring(sep + 1);
-                    if ("displaying".equals(status)) {
-                        Prefs.removePendingAck(this, taskId, status);
-                    } else {
-                        sendAckReliable(taskId, status);
-                    }
+                    sendAckReliable(taskId, status);
                 }
             }
         }

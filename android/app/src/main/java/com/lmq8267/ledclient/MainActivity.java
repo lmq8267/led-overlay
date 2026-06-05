@@ -104,7 +104,6 @@ public class MainActivity extends Activity {
         load();
         renderHome();
         requestStartupPermissions(false);
-        if (Prefs.server(this).trim().length() > 0) startClient(false);
     }
 
     @Override
@@ -830,14 +829,17 @@ public class MainActivity extends Activity {
                     }
                 }));
 
-        boolean overlayOk = Build.VERSION.SDK_INT < 23 || Settings.canDrawOverlays(this) || isTv();
+        boolean overlayOk = isTv()
+                ? isAccessibilityServiceEnabled()
+                : (Build.VERSION.SDK_INT < 23 || Settings.canDrawOverlays(this));
         card.addView(permissionRowWithDivider(
-                getString(R.string.permission_overlay),
+                isTv() ? getString(R.string.permission_accessibility) : getString(R.string.permission_overlay),
                 overlayOk ? getString(R.string.permission_granted) : getString(R.string.permission_missing),
                 overlayOk,
                 new View.OnClickListener() {
                     @Override public void onClick(View v) {
-                        openOverlaySettings();
+                        if (isTv()) openAccessibilitySettings();
+                        else openOverlaySettings();
                     }
                 }));
 
@@ -878,7 +880,7 @@ public class MainActivity extends Activity {
                 getString(R.string.tv_adb_command, pkg),
                 getString(R.string.tv_adb_command2, pkg),
                 getString(R.string.tv_adb_command3, pkg),
-                getString(R.string.tv_adb_command4, pkg),
+                accessibilityAppendCommand(pkg),
                 getString(R.string.tv_adb_command5, pkg),
         };
         final String allCmds = cmds[0] + "\n" + cmds[1] + "\n" + cmds[2]
@@ -1109,11 +1111,13 @@ public class MainActivity extends Activity {
             serverInput.setText(displayAddress(Prefs.server(this)));
         refreshServerSuggestions();
         if (restartIfRunning && Prefs.running(this) && serverChanged) {
-            Intent start = new Intent(this, LedService.class);
-            start.setAction(Prefs.ACTION_START);
-            if (Build.VERSION.SDK_INT >= 26 && !isTv()) startForegroundService(start);
-            else startService(start);
             Prefs.setConnectionState(this, Prefs.CONNECTION_CONNECTING);
+            if (!isTv()) {
+                Intent start = new Intent(this, LedService.class);
+                start.setAction(Prefs.ACTION_START);
+                if (Build.VERSION.SDK_INT >= 26) startForegroundService(start);
+                else startService(start);
+            }
             updateServerStatusCard();
         }
     }
@@ -1132,11 +1136,30 @@ public class MainActivity extends Activity {
             showTip(getString(R.string.toast_server_empty), false);
             return;
         }
+        if (isTv()) {
+            if (!isAccessibilityServiceEnabled()) {
+                if (showToast) showTip(getString(R.string.accessibility_permission), false);
+                openAccessibilitySettings();
+                return;
+            }
+            boolean wasRunning = Prefs.running(this);
+            stopService(new Intent(this, LedService.class));
+            SharedPreferences.Editor editor = Prefs.store(this).edit()
+                    .putBoolean(Prefs.KEY_RUNNING, true);
+            if (!wasRunning) editor.putString(Prefs.KEY_CONNECTION_STATE, Prefs.CONNECTION_CONNECTING);
+            editor.apply();
+            updateRunButton(true);
+            updateStatus(true);
+            updateServerStatusCard();
+            if (page == 0) renderHome();
+            if (showToast) showTip(getString(R.string.toast_started), true);
+            return;
+        }
         if (!requestStartupPermissions(true)) return;
         boolean wasRunning = Prefs.running(this);
         Intent intent = new Intent(this, LedService.class);
         intent.setAction(Prefs.ACTION_START);
-        if (Build.VERSION.SDK_INT >= 26 && !isTv()) startForegroundService(intent);
+        if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent);
         else startService(intent);
         SharedPreferences.Editor editor = Prefs.store(this).edit()
                 .putBoolean(Prefs.KEY_RUNNING, true);
@@ -1150,6 +1173,7 @@ public class MainActivity extends Activity {
     }
 
     private boolean requestStartupPermissions(boolean showToast) {
+        if (isTv()) return true;
         if (Build.VERSION.SDK_INT >= 33
                 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[] {"android.permission.POST_NOTIFICATIONS"}, 10);
@@ -1190,7 +1214,8 @@ public class MainActivity extends Activity {
     private void stopClient() {
         Intent intent = new Intent(this, LedService.class);
         intent.setAction(Prefs.ACTION_STOP);
-        startService(intent);
+        if (!isTv()) startService(intent);
+        else stopService(new Intent(this, LedService.class));
         Prefs.store(this).edit()
                 .putBoolean(Prefs.KEY_RUNNING, false)
                 .putString(Prefs.KEY_CONNECTION_STATE, Prefs.CONNECTION_DISCONNECTED)
@@ -1286,6 +1311,15 @@ public class MainActivity extends Activity {
             } else {
                 openAppDetailsSettings();
             }
+        } catch (Exception e) {
+            showTip(getString(R.string.toast_open_settings_failed, e.getMessage()), false);
+            openAppDetailsSettings();
+        }
+    }
+
+    private void openAccessibilitySettings() {
+        try {
+            startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
         } catch (Exception e) {
             showTip(getString(R.string.toast_open_settings_failed, e.getMessage()), false);
             openAppDetailsSettings();
@@ -1454,6 +1488,36 @@ public class MainActivity extends Activity {
     /** 检测是否为电视设备（电视无悬浮窗权限开关，需要特殊处理） */
     private boolean isTv() {
         return getPackageManager().hasSystemFeature(PackageManager.FEATURE_LEANBACK);
+    }
+
+    private boolean isAccessibilityServiceEnabled() {
+        String enabled = Settings.Secure.getString(getContentResolver(),
+                Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
+        if (enabled == null || enabled.length() == 0) return false;
+        String expectedShort = getPackageName() + "/.LedAccessibilityService";
+        String expectedLong = getPackageName() + "/" + LedAccessibilityService.class.getName();
+        String[] services = enabled.split(":");
+        for (int i = 0; i < services.length; i++) {
+            String service = services[i];
+            if (expectedShort.equals(service) || expectedLong.equals(service)) return true;
+            ComponentName component = ComponentName.unflattenFromString(service);
+            if (component != null
+                    && getPackageName().equals(component.getPackageName())
+                    && LedAccessibilityService.class.getName().equals(component.getClassName())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private String accessibilityAppendCommand(String pkg) {
+        String service = pkg + "/.LedAccessibilityService";
+        return "adb shell 'OLD=$(settings get secure enabled_accessibility_services); "
+                + "S=\"" + service + "\"; "
+                + "if [ \"$OLD\" = \"null\" ] || [ -z \"$OLD\" ]; then "
+                + "settings put secure enabled_accessibility_services \"$S\"; "
+                + "elif echo \"$OLD\" | grep -q \"$S\"; then true; "
+                + "else settings put secure enabled_accessibility_services \"$OLD:$S\"; fi'";
     }
 
     private int dp(int value) {

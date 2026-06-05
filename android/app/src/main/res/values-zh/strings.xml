@@ -32,6 +32,7 @@
     <string name="permission_status_desc">点击条目跳转到对应系统授权页</string>
     <string name="permission_notifications">通知权限</string>
     <string name="permission_overlay">悬浮窗权限</string>
+    <string name="permission_accessibility">无障碍服务</string>
     <string name="permission_battery">电池优化</string>
     <string name="permission_boot">开机自启</string>
     <string name="permission_granted">已授权</string>
@@ -45,6 +46,7 @@
     <string name="copy_all">全部复制</string>
     <string name="clear_logs">清空日志</string>
     <string name="overlay_permission">需要悬浮窗权限，才能在其他应用上方显示消息。</string>
+    <string name="accessibility_permission">请先在电视上启用 LED悬浮屏 无障碍服务。</string>
     <string name="notification_permission">需要通知权限，才能稳定保持后台服务运行。</string>
     <string name="toast_boot_enabled">开机自启已开启</string>
     <string name="toast_boot_disabled">开机自启已关闭</string>
@@ -67,7 +69,6 @@
     <string name="tv_adb_command">adb shell appops set %s SYSTEM_ALERT_WINDOW allow</string>
     <string name="tv_adb_command2">adb shell appops set %s RUN_IN_BACKGROUND allow</string>
     <string name="tv_adb_command3">adb shell appops set %s RUN_ANY_IN_BACKGROUND allow</string>
-    <string name="tv_adb_command4">adb shell settings put secure enabled_accessibility_services %s/.LedAccessibilityService</string>
     <string name="tv_adb_command5">adb shell settings put secure accessibility_enabled 1</string>
     <string name="copy_adb">一键复制五条 ADB 命令</string>
     <string name="toast_adb_copied">五条 ADB 命令已复制</string>

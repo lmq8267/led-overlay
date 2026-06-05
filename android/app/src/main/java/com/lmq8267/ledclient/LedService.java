@@ -5,8 +5,6 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
-import android.app.AlarmManager;
-import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.PixelFormat;
@@ -59,7 +57,6 @@ public class LedService extends Service {
             // 小米电视 AppsRelaunchController 会拦截 setServiceForeground
             // 忽略异常，作为一个普通后台服务运行
         }
-        scheduleWatchdog();
         mainHandler.postDelayed(pendingAckFlusher, 5000);
     }
 
@@ -76,16 +73,17 @@ public class LedService extends Service {
     @Override
     public void onDestroy() {
         if (mainHandler != null) mainHandler.removeCallbacks(pendingAckFlusher);
-        cancelWatchdog();
         connectionGeneration++;
         if (ws != null) ws.stop();
         if (overlay != null) {
             try { windowManager.removeView(overlay); } catch (Exception ignored) {}
         }
-        Prefs.store(this).edit()
-                .putBoolean(Prefs.KEY_RUNNING, false)
-                .putString(Prefs.KEY_CONNECTION_STATE, Prefs.CONNECTION_DISCONNECTED)
-                .apply();
+        if (!getPackageManager().hasSystemFeature(PackageManager.FEATURE_LEANBACK)) {
+            Prefs.store(this).edit()
+                    .putBoolean(Prefs.KEY_RUNNING, false)
+                    .putString(Prefs.KEY_CONNECTION_STATE, Prefs.CONNECTION_DISCONNECTED)
+                    .apply();
+        }
         super.onDestroy();
     }
 
@@ -346,27 +344,23 @@ public class LedService extends Service {
     private void sendAckReliable(String taskId, String status, String detail) {
         if ("completed".equals(status)) {
             Prefs.addPendingCompletedAck(this, taskId);
+            sendAck(taskId, status, detail);
             sendCompletedAckHttp(taskId, detail);
             scheduleCompletedAckRetry(taskId, detail);
             return;
         }
-        boolean sent = sendAck(taskId, status, detail);
-        if (sent) {
-            Prefs.removePendingAck(this, taskId, status);
-        } else {
-            // WS 发送失败 → HTTP 兜底 + 1s/3s 重试（与 completed 同级）
-            sendAckHttp(taskId, status, detail);
-            scheduleAckRetry(taskId, status, detail);
-            Prefs.addPendingAck(this, taskId, status);
-            LogStore.append(this, status + " ACK 发送失败，等待补发：" + taskId);
-        }
+        Prefs.addPendingAck(this, taskId, status);
+        sendAck(taskId, status, detail);
+        sendAckHttpAsync(taskId, status, detail);
+        scheduleAckRetry(taskId, status, detail);
     }
 
     private void scheduleCompletedAckRetry(final String taskId, final String detail) {
         if (taskId == null || taskId.length() == 0 || mainHandler == null) return;
+        final String retryKey = "completed:" + taskId;
         synchronized (completedAckRetries) {
-            if (completedAckRetries.contains(taskId)) return;
-            completedAckRetries.add(taskId);
+            if (completedAckRetries.contains(retryKey)) return;
+            completedAckRetries.add(retryKey);
         }
         mainHandler.postDelayed(new Runnable() {
             @Override public void run() {
@@ -381,7 +375,7 @@ public class LedService extends Service {
                     sendCompletedAckHttp(taskId, detail);
                 }
                 synchronized (completedAckRetries) {
-                    completedAckRetries.remove(taskId);
+                    completedAckRetries.remove(retryKey);
                 }
             }
         }, 3000);
@@ -394,24 +388,21 @@ public class LedService extends Service {
     /** 通用 ACK HTTP 重试（received/displaying/failed 等非 completed 状态） */
     private void scheduleAckRetry(final String taskId, final String status, final String detail) {
         if (taskId == null || taskId.length() == 0 || mainHandler == null) return;
+        final String retryKey = status + ":" + taskId;
         synchronized (completedAckRetries) {
-            if (completedAckRetries.contains(taskId)) return;
-            completedAckRetries.add(taskId);
+            if (completedAckRetries.contains(retryKey)) return;
+            completedAckRetries.add(retryKey);
         }
         mainHandler.postDelayed(new Runnable() {
             @Override public void run() {
-                if (shouldRetryAck(taskId, status)) {
-                    sendAckHttp(taskId, status, detail);
-                }
+                if (shouldRetryAck(taskId, status)) sendAckHttpAsync(taskId, status, detail);
             }
         }, 1000);
         mainHandler.postDelayed(new Runnable() {
             @Override public void run() {
-                if (shouldRetryAck(taskId, status)) {
-                    sendAckHttp(taskId, status, detail);
-                }
+                if (shouldRetryAck(taskId, status)) sendAckHttpAsync(taskId, status, detail);
                 synchronized (completedAckRetries) {
-                    completedAckRetries.remove(taskId);
+                    completedAckRetries.remove(retryKey);
                 }
             }
         }, 3000);
@@ -420,6 +411,22 @@ public class LedService extends Service {
     private boolean shouldRetryAck(String taskId, String status) {
         String pending = Prefs.pendingAcks(this);
         return pending.contains("|" + status + ":" + taskId + "|");
+    }
+
+    private void sendAckHttpAsync(final String taskId, final String status, final String detail) {
+        if (taskId == null || taskId.length() == 0) return;
+        new Thread(new Runnable() {
+            @Override public void run() {
+                boolean ok = sendAckHttp(taskId, status, detail == null ? "" : detail);
+                if (ok) {
+                    Prefs.removePendingAck(LedService.this, taskId, status);
+                    LogStore.append(LedService.this, status + " ACK HTTP 状态已上报：" + taskId);
+                } else {
+                    LogStore.append(LedService.this, status + " ACK HTTP 失败，等待补发：" + taskId
+                            + (lastHttpAckError.length() == 0 ? "" : "，" + lastHttpAckError));
+                }
+            }
+        }, "led-ack-http-" + status).start();
     }
 
     private void sendCompletedAckHttp(final String taskId, final String detail) {
@@ -491,11 +498,7 @@ public class LedService extends Service {
                 if (sep > 0 && sep + 1 < entries[i].length()) {
                     String status = entries[i].substring(0, sep);
                     String taskId = entries[i].substring(sep + 1);
-                    if ("displaying".equals(status)) {
-                        Prefs.removePendingAck(this, taskId, status);
-                    } else {
-                        sendAckReliable(taskId, status);
-                    }
+                    sendAckReliable(taskId, status);
                 }
             }
         }
@@ -523,29 +526,6 @@ public class LedService extends Service {
                 processDisplayQueue();
             }
         });
-    }
-
-    // ── 看门狗：MIUI 等系统会忽略 START_STICKY 杀死后台服务 ──────
-    private PendingIntent watchdogPendingIntent() {
-        Intent intent = new Intent(this, WatchdogReceiver.class);
-        return PendingIntent.getBroadcast(this, 0, intent,
-                Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT : 0);
-    }
-
-    private void scheduleWatchdog() {
-        AlarmManager am = (AlarmManager) getSystemService(ALARM_SERVICE);
-        if (am == null) return;
-        cancelWatchdog(); // 先取消已有闹钟，防止重复
-        PendingIntent pi = watchdogPendingIntent();
-        long interval = 3 * 60 * 1000; // 每 3 分钟检查一次
-        long trigger = System.currentTimeMillis() + interval;
-        am.setInexactRepeating(AlarmManager.RTC_WAKEUP, trigger, interval, pi);
-    }
-
-    private void cancelWatchdog() {
-        AlarmManager am = (AlarmManager) getSystemService(ALARM_SERVICE);
-        if (am == null) return;
-        am.cancel(watchdogPendingIntent());
     }
 
     private Notification notification() {
