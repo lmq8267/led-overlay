@@ -43,6 +43,7 @@
     <string name="permission_not_ignored">Not ignored</string>
     <string name="permission_not_required">Not required</string>
     <string name="toast_open_settings_failed">Unable to open settings: %1$s</string>
+    <string name="toast_accessibility_settings_unavailable">This TV has no accessibility settings entry. Use the ADB script shown on the About page.</string>
     <string name="copy_all">Copy all</string>
     <string name="clear_logs">Clear logs</string>
     <string name="overlay_permission">Overlay permission is required to show messages above other apps.</string>

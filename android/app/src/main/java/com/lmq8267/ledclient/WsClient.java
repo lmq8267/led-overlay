@@ -17,7 +17,8 @@ import javax.net.ssl.SSLSocketFactory;
 
 final class WsClient {
     private static final int CONNECT_TIMEOUT_MS = 5000;
-    private static final int READ_TIMEOUT_MS = 30000;
+    private static final int READ_TIMEOUT_MS = 60000;
+    private static final int HEARTBEAT_INTERVAL_MS = 20000;
 
     interface Listener {
         void onOpen();
@@ -34,6 +35,7 @@ final class WsClient {
     private Socket socket;
     private BufferedInputStream in;
     private BufferedOutputStream out;
+    private Thread heartbeatThread;
 
     WsClient(String url, Listener listener) {
         this.urls = normalizeCandidates(url);
@@ -119,10 +121,33 @@ final class WsClient {
         if (!response.startsWith("HTTP/1.1 101") && !response.startsWith("HTTP/1.0 101")) {
             throw new IOException("websocket handshake failed");
         }
+        socket.setSoTimeout(0);
         openedInAttempt = true;
         open = true;
+        startHeartbeat();
         if (listener != null) listener.onOpen();
         readFrames();
+    }
+
+    private void startHeartbeat() {
+        Thread previous = heartbeatThread;
+        if (previous != null) previous.interrupt();
+        heartbeatThread = new Thread(new Runnable() {
+            @Override public void run() {
+                while (running && open) {
+                    sleep(HEARTBEAT_INTERVAL_MS);
+                    if (!running || !open) break;
+                    try {
+                        sendText("{\"type\":\"ping\"}");
+                    } catch (Exception e) {
+                        close();
+                        break;
+                    }
+                }
+            }
+        }, "led-ws-heartbeat");
+        heartbeatThread.setDaemon(true);
+        heartbeatThread.start();
     }
 
     private void readFrames() throws IOException {
@@ -207,6 +232,9 @@ final class WsClient {
 
     private void close() {
         open = false;
+        Thread thread = heartbeatThread;
+        heartbeatThread = null;
+        if (thread != null) thread.interrupt();
         try { if (socket != null) socket.close(); } catch (Exception ignored) {}
         socket = null;
         in = null;

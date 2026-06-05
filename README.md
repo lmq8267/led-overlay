@@ -28,7 +28,7 @@ LED Overlay 用于把服务端管理页面创建的短文本消息实时下发�
 
 | 服务端主页 | Android 首页 | 悬浮屏显示 |
 | --- | --- | --- |
-| <img width="1892" height="834" alt="图片" src="https://github.com/user-attachments/assets/8174ba4d-0a0b-4891-8bbc-1b2105936baa" /> | <img width="429" height="899" alt="图片" src="https://github.com/user-attachments/assets/191c5234-37d6-4913-882d-3bd42a2efe42" /> | <img width="427" height="928" alt="图片" src="https://github.com/user-attachments/assets/179e4839-f93c-474b-8503-48177d8288aa" /> |
+| ![](./docs/主页.png) | ![](./docs/首页.png) | ![](./docs/悬浮消息.png) |
 
 ## 核心能力
 

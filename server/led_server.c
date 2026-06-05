@@ -410,10 +410,17 @@ static int ws_read(int fd, char *out, size_t cap) {
 
 static void set_socket_timeouts(int fd) {
     struct timeval tv;
-    tv.tv_sec = 30;
+    tv.tv_sec = 60;
     tv.tv_usec = 0;
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+}
+
+static void clear_socket_read_timeout(int fd) {
+    struct timeval tv;
+    tv.tv_sec = 0;
+    tv.tv_usec = 0;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 }
 
 /* ── JSON 辅助 ─────────────────────────────────────────── */
@@ -1284,6 +1291,7 @@ static void handle_client_ws(int fd, const char *addr) {
     json_value(buf, "clientId", key, sizeof(key));
     json_value(buf, "name", name, sizeof(name));
     if (strcmp(type, "hello") != 0 || key[0] == 0) return;
+    clear_socket_read_timeout(fd);
 
     Client *c;
     pthread_mutex_lock(&lock);
@@ -1307,6 +1315,7 @@ static void handle_client_ws(int fd, const char *addr) {
     broadcast_state();
     while (ws_read(fd, buf, sizeof(buf))) {
         json_value(buf, "type", type, sizeof(type));
+        if (strcmp(type, "ping") == 0) continue;
         pthread_mutex_lock(&lock);
         if (strcmp(type, "ack") == 0) {
             char tid[32], status[32], detail[1024];
@@ -1487,6 +1496,7 @@ static void *connection_thread(void *arg) {
             return NULL;
         }
         if (websocket_handshake(fd, header)) {
+            clear_socket_read_timeout(fd);
             handle_admin(fd);
         }
         close(fd);

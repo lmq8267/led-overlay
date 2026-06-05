@@ -43,6 +43,7 @@
     <string name="permission_not_ignored">未忽略</string>
     <string name="permission_not_required">无需授权</string>
     <string name="toast_open_settings_failed">无法打开设置：%1$s</string>
+    <string name="toast_accessibility_settings_unavailable">当前电视系统没有无障碍设置入口，请使用关于页的 ADB 脚本授权。</string>
     <string name="copy_all">全部复制</string>
     <string name="clear_logs">清空日志</string>
     <string name="overlay_permission">需要悬浮窗权限，才能在其他应用上方显示消息。</string>

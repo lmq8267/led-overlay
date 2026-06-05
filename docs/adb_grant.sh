@@ -64,10 +64,10 @@ echo "检查无障碍服务是否已开启..."
 CURRENT_SERVICES="$(adb -s "${ADB_IP}:${ADB_PORT}" shell settings get secure enabled_accessibility_services 2>/dev/null | tr -d '\r')"
 ACCESSIBILITY_STATUS="$(adb -s "${ADB_IP}:${ADB_PORT}" shell dumpsys accessibility 2>/dev/null || true)"
 SERVICE_CRASHED=0
-if echo "${ACCESSIBILITY_STATUS}" | grep -q "Crashed services:.*${PACKAGE}"; then
+if echo "${ACCESSIBILITY_STATUS}" | grep -F "Crashed services:" | grep -Fq "${PACKAGE}"; then
     SERVICE_CRASHED=1
 fi
-if echo "${CURRENT_SERVICES}" | grep -q "${ACCESSIBILITY_SERVICE}"; then
+if echo "${CURRENT_SERVICES}" | grep -Fq "${ACCESSIBILITY_SERVICE}"; then
     if [ "${SERVICE_CRASHED}" = "1" ]; then
         echo "    已开启，但系统标记该无障碍服务已崩溃，将刷新本应用绑定"
         echo ""
@@ -118,17 +118,27 @@ echo ""
 echo "[6/6] 开启无障碍服务（后台保活）..."
 OLD_SERVICES="$(adb -s "${ADB_IP}:${ADB_PORT}" shell settings get secure enabled_accessibility_services 2>/dev/null | tr -d '\r')"
 if [ "${SERVICE_CRASHED}" = "1" ]; then
-    REMOVE_SERVICES="$(printf "%s" "${OLD_SERVICES}" \
-        | sed -e "s#:${ACCESSIBILITY_SERVICE}##" \
-              -e "s#${ACCESSIBILITY_SERVICE}:##" \
-              -e "s#^${ACCESSIBILITY_SERVICE}$##")"
+    REMOVE_SERVICES=""
+    OLD_IFS="${IFS}"
+    IFS=":"
+    for service in ${OLD_SERVICES}; do
+        if [ "${service}" = "${ACCESSIBILITY_SERVICE}" ] || [ -z "${service}" ] || [ "${service}" = "null" ]; then
+            continue
+        fi
+        if [ -z "${REMOVE_SERVICES}" ]; then
+            REMOVE_SERVICES="${service}"
+        else
+            REMOVE_SERVICES="${REMOVE_SERVICES}:${service}"
+        fi
+    done
+    IFS="${OLD_IFS}"
     adb -s "${ADB_IP}:${ADB_PORT}" shell settings put secure enabled_accessibility_services "${REMOVE_SERVICES}"
     sleep 1
     OLD_SERVICES="${REMOVE_SERVICES}"
 fi
 if [ "${OLD_SERVICES}" = "null" ] || [ -z "${OLD_SERVICES}" ]; then
     NEW_SERVICES="${ACCESSIBILITY_SERVICE}"
-elif echo "${OLD_SERVICES}" | grep -q "${ACCESSIBILITY_SERVICE}"; then
+elif echo "${OLD_SERVICES}" | grep -Fq "${ACCESSIBILITY_SERVICE}"; then
     NEW_SERVICES="${OLD_SERVICES}"
 else
     NEW_SERVICES="${OLD_SERVICES}:${ACCESSIBILITY_SERVICE}"
@@ -141,7 +151,7 @@ echo ""
 # ── 验证 ──
 echo "  验证权限..."
 adb -s "${ADB_IP}:${ADB_PORT}" shell appops get "${PACKAGE}" 2>/dev/null | grep -E "SYSTEM_ALERT_WINDOW|RUN_IN_BACKGROUND|RUN_ANY_IN_BACKGROUND"
-adb -s "${ADB_IP}:${ADB_PORT}" shell settings get secure enabled_accessibility_services 2>/dev/null | grep -E "${PACKAGE}"
+adb -s "${ADB_IP}:${ADB_PORT}" shell settings get secure enabled_accessibility_services 2>/dev/null | grep -F "${PACKAGE}"
 echo ""
 
 echo "╔══════════════════════════════════════════╗"

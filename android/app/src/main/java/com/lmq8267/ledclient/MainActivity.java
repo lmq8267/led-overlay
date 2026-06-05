@@ -81,6 +81,7 @@ public class MainActivity extends Activity {
     private String lastLogText = null;
     private long lastHomeNavTapAt = 0;
     private long lastLogsNavTapAt = 0;
+    private long lastAboutNavTapAt = 0;
     private long logsAutoScrollPausedUntil = 0;
 
     // ── 定时器 ────────────────────────────────────────────
@@ -228,18 +229,22 @@ public class MainActivity extends Activity {
                 if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
                 int amount = Math.max(dp(96), scrollView.getHeight() / 3);
                 if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
+                    if (page == 1) pauseLogsAutoScroll();
                     scrollView.smoothScrollBy(0, amount);
                     return false;
                 }
                 if (keyCode == KeyEvent.KEYCODE_DPAD_UP) {
+                    if (page == 1) pauseLogsAutoScroll();
                     scrollView.smoothScrollBy(0, -amount);
                     return false;
                 }
                 if (keyCode == KeyEvent.KEYCODE_PAGE_DOWN) {
+                    if (page == 1) pauseLogsAutoScroll();
                     scrollView.smoothScrollBy(0, scrollView.getHeight());
                     return true;
                 }
                 if (keyCode == KeyEvent.KEYCODE_PAGE_UP) {
+                    if (page == 1) pauseLogsAutoScroll();
                     scrollView.smoothScrollBy(0, -scrollView.getHeight());
                     return true;
                 }
@@ -299,24 +304,10 @@ public class MainActivity extends Activity {
         makeFocusableAction(item);
         item.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
-                if (targetPage == 0 && page == 0) {
-                    long now = System.currentTimeMillis();
-                    if (now - lastHomeNavTapAt < 350 && scrollView != null) {
-                        scrollView.smoothScrollTo(0, 0);
-                    }
-                    lastHomeNavTapAt = now;
+                if (page == targetPage) {
+                    handleNavRetap(targetPage);
                     return;
                 }
-                if (targetPage == 1 && page == 1) {
-                    long now = System.currentTimeMillis();
-                    if (now - lastLogsNavTapAt < 350 && scrollView != null) {
-                        pauseLogsAutoScroll();
-                        scrollView.smoothScrollTo(0, 0);
-                    }
-                    lastLogsNavTapAt = now;
-                    return;
-                }
-                if (page == targetPage) return;
                 page = targetPage;
                 renderCurrentPage();
                 if (targetPage == 0 && scrollView != null) {
@@ -329,6 +320,23 @@ public class MainActivity extends Activity {
             }
         });
         return item;
+    }
+
+    private void handleNavRetap(int targetPage) {
+        long now = System.currentTimeMillis();
+        long lastTap;
+        if (targetPage == 0) lastTap = lastHomeNavTapAt;
+        else if (targetPage == 1) lastTap = lastLogsNavTapAt;
+        else lastTap = lastAboutNavTapAt;
+
+        if (now - lastTap < 350 && scrollView != null) {
+            if (targetPage == 1) pauseLogsAutoScroll();
+            scrollView.smoothScrollTo(0, 0);
+        }
+
+        if (targetPage == 0) lastHomeNavTapAt = now;
+        else if (targetPage == 1) lastLogsNavTapAt = now;
+        else lastAboutNavTapAt = now;
     }
 
     private void updateNavigation() {
@@ -502,6 +510,7 @@ public class MainActivity extends Activity {
             }
         });
         bootSwitch.setFocusable(false);
+        bootSwitch.setClickable(false);
         bootRow.addView(bootLabel, new LinearLayout.LayoutParams(0, -2, 1));
         bootRow.addView(bootSwitch, new LinearLayout.LayoutParams(-2, -2));
         makeFocusableAction(bootRow);
@@ -757,7 +766,7 @@ public class MainActivity extends Activity {
         if (scrollToBottom && scrollView != null) {
             scrollView.post(new Runnable() {
                 @Override public void run() {
-                    scrollView.fullScroll(View.FOCUS_DOWN);
+                    scrollView.smoothScrollTo(0, Math.max(0, contentArea.getHeight() - scrollView.getHeight()));
                 }
             });
         }
@@ -1421,8 +1430,21 @@ public class MainActivity extends Activity {
         try {
             startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
         } catch (Exception e) {
-            showTip(getString(R.string.toast_open_settings_failed, e.getMessage()), false);
-            openAppDetailsSettings();
+            if (isTv()) {
+                showTip(getString(R.string.toast_accessibility_settings_unavailable), false);
+                page = 2;
+                renderCurrentPage();
+                if (scrollView != null) {
+                    scrollView.post(new Runnable() {
+                        @Override public void run() {
+                            scrollView.smoothScrollTo(0, contentArea == null ? 0 : contentArea.getHeight());
+                        }
+                    });
+                }
+            } else {
+                showTip(getString(R.string.toast_open_settings_failed, e.getMessage()), false);
+                openAppDetailsSettings();
+            }
         }
     }
 
@@ -1595,6 +1617,18 @@ public class MainActivity extends Activity {
     private void makeFocusablePanel(final View view) {
         view.setFocusable(true);
         view.setFocusableInTouchMode(false);
+        view.setOnKeyListener(new View.OnKeyListener() {
+            @Override public boolean onKey(View v, int keyCode, KeyEvent event) {
+                if (event.getAction() == KeyEvent.ACTION_DOWN
+                        && (keyCode == KeyEvent.KEYCODE_DPAD_UP
+                        || keyCode == KeyEvent.KEYCODE_DPAD_DOWN
+                        || keyCode == KeyEvent.KEYCODE_PAGE_UP
+                        || keyCode == KeyEvent.KEYCODE_PAGE_DOWN)) {
+                    if (page == 1) pauseLogsAutoScroll();
+                }
+                return false;
+            }
+        });
         view.setOnFocusChangeListener(new View.OnFocusChangeListener() {
             @Override public void onFocusChange(View v, boolean hasFocus) {
                 GradientDrawable bg = new GradientDrawable();
@@ -1621,8 +1655,7 @@ public class MainActivity extends Activity {
             bg.setCornerRadius(dp(10));
             setBackgroundCompat(view, bg);
         }
-        view.animate().scaleX(focused ? 1.015f : 1f).scaleY(focused ? 1.015f : 1f)
-                .setDuration(120).start();
+        view.animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(80).start();
     }
 
     private void applyInputFocusStyle(View view, boolean focused) {
