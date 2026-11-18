@@ -1,13 +1,11 @@
 package com.lmq8267.ledclient;
 
 import android.app.Activity;
-import android.app.ActivityManager;
 import android.app.Dialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.ComponentName;
 import android.content.Intent;
-import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Rect;
@@ -43,7 +41,6 @@ import android.widget.AutoCompleteTextView;
 import android.widget.AdapterView;
 
 import java.util.ArrayList;
-import java.util.List;
 
 public class MainActivity extends Activity {
 
@@ -83,15 +80,17 @@ public class MainActivity extends Activity {
     private long lastLogsNavTapAt = 0;
     private long lastAboutNavTapAt = 0;
     private long logsAutoScrollPausedUntil = 0;
+    private long lastRecoveryAttemptAt = 0L;
 
     // ── 定时器 ────────────────────────────────────────────
     private final Handler tickerHandler = new Handler(Looper.getMainLooper());
     private final Runnable ticker = new Runnable() {
         @Override public void run() {
-            boolean running = Prefs.running(MainActivity.this);
-            updateRunButton(running);
-            updateStatus(running);
+            boolean enabled = Prefs.enabled(MainActivity.this);
+            updateRunButton(enabled);
+            updateStatus(isAlive());
             updateServerStatusCard();
+            recoverServiceIfNeeded();
             if (page == 1) refreshLogs(shouldAutoScrollLogs());
             tickerHandler.postDelayed(this, 1000);
         }
@@ -108,23 +107,29 @@ public class MainActivity extends Activity {
         load();
         renderHome();
         requestIdleOverlayCleanup();
-        if (requestStartupPermissions(false)) autoStartIfNeeded();
+        requestStartupPermissions(false);
+        autoStartIfNeeded();
     }
 
     @Override
     protected void onResume() {
         super.onResume();
-        boolean running = Prefs.running(this);
-        updateRunButton(running);
-        updateStatus(running);
+        updateRunButton(Prefs.enabled(this));
+        updateStatus(isAlive());
         tickerHandler.removeCallbacks(ticker);
         tickerHandler.postDelayed(ticker, 1000);
         renderCurrentPage();
         updateServerStatusCard();
+        // 用户从后台回到应用时也补一次恢复：onCreate 只会在首次创建时执行，
+        // 而系统可能在页面停留期间把服务杀掉。
+        autoStartIfNeeded();
     }
 
     @Override
     protected void onPause() {
+        // 页面切换/进后台时把输入框里未失焦的地址落盘；地址有变化就按“保存并重启”处理，
+        // 否则界面显示新地址、服务却还连着旧地址，pending ACK 也会被清到新服务端。
+        saveServerSettings(true);
         tickerHandler.removeCallbacks(ticker);
         super.onPause();
     }
@@ -292,7 +297,7 @@ public class MainActivity extends Activity {
         root.addView(bottomNav, new LinearLayout.LayoutParams(-1, -2));
         setContentView(root);
         updateNavigation();
-        updateStatus(Prefs.running(this));
+        updateStatus(isAlive());
     }
 
     private TextView navItem(String text, final int targetPage) {
@@ -534,11 +539,11 @@ public class MainActivity extends Activity {
         runButton.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
                 save();
-                if (Prefs.running(MainActivity.this)) stopClient();
+                if (Prefs.enabled(MainActivity.this)) stopClient();
                 else startClient(true);
             }
         });
-        updateRunButton(Prefs.running(this));
+        updateRunButton(Prefs.enabled(this));
         card.addView(runButton, fullWidth(-2, -2));
 
         addCard(card);
@@ -790,12 +795,13 @@ public class MainActivity extends Activity {
             return;
         }
         String[] lines = logs.split("\\n");
+        int start = Math.max(0, lines.length - 200);
         int row = 0;
-        for (int i = 0; i < lines.length; i++) {
+        for (int i = start; i < lines.length; i++) {
             if (lines[i].length() == 0) continue;
             TextView item = logLineView(lines[i], row);
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
-            if (row < lines.length - 1) lp.bottomMargin = dp(6);
+            if (i < lines.length - 1) lp.bottomMargin = dp(6);
             logList.addView(item, lp);
             row++;
         }
@@ -886,17 +892,25 @@ public class MainActivity extends Activity {
                     }
                 }));
 
-        boolean overlayOk = isTv()
-                ? isAccessibilityServiceEnabled()
-                : (Build.VERSION.SDK_INT < 23 || Settings.canDrawOverlays(this));
+        boolean overlayOk = Build.VERSION.SDK_INT < 23 || Settings.canDrawOverlays(this);
         card.addView(permissionRowWithDivider(
-                isTv() ? getString(R.string.permission_accessibility) : getString(R.string.permission_overlay),
+                getString(R.string.permission_overlay),
                 overlayOk ? getString(R.string.permission_granted) : getString(R.string.permission_missing),
                 overlayOk,
                 new View.OnClickListener() {
                     @Override public void onClick(View v) {
-                        if (isTv()) openAccessibilitySettings();
-                        else openOverlaySettings();
+                        openOverlaySettings();
+                    }
+                }));
+
+        boolean notifAccessOk = isNotificationListenerEnabled();
+        card.addView(permissionRowWithDivider(
+                getString(R.string.permission_notification_access),
+                notifAccessOk ? getString(R.string.permission_granted) : getString(R.string.permission_missing),
+                notifAccessOk,
+                new View.OnClickListener() {
+                    @Override public void onClick(View v) {
+                        openNotificationListenerSettings();
                     }
                 }));
 
@@ -933,15 +947,15 @@ public class MainActivity extends Activity {
         card.addView(divider());
 
         final String pkg = getPackageName();
+        final String notifComponent = pkg + "/" + pkg + ".LedNotifProbe";
+        // 前三条是装机必需：悬浮窗、通知使用权（强停后复活）、后台运行兜底；第四条只用于验证。
         final String[] cmds = new String[] {
                 getString(R.string.tv_adb_command, pkg),
-                getString(R.string.tv_adb_command2, pkg),
+                getString(R.string.tv_adb_command2, notifComponent),
                 getString(R.string.tv_adb_command3, pkg),
-                accessibilityAppendCommand(pkg),
-                getString(R.string.tv_adb_command5, pkg),
+                getString(R.string.tv_adb_command4),
         };
-        final String allCmds = cmds[0] + "\n" + cmds[1] + "\n" + cmds[2]
-                + "\n" + cmds[3] + "\n" + cmds[4];
+        final String allCmds = cmds[0] + "\n" + cmds[1] + "\n" + cmds[2] + "\n" + cmds[3];
 
         for (int i = 0; i < cmds.length; i++) {
             TextView codeView = new TextView(this);
@@ -1147,7 +1161,7 @@ public class MainActivity extends Activity {
     // ═══════════════════════════════════════════════════════
 
     private void load() {
-        updateRunButton(Prefs.running(this));
+        updateRunButton(Prefs.enabled(this));
     }
 
     private void save() {
@@ -1159,47 +1173,35 @@ public class MainActivity extends Activity {
     }
 
     private void autoStartIfNeeded() {
+        // 只有用户明确启用过才自动恢复。否则“停止”后重进应用又会被拉起来。
+        if (!Prefs.enabled(this)) return;
         if (Prefs.server(this).trim().length() == 0) return;
-        if (isClientActiveEnough()) return;
+        if (isAlive()) return;
         startClient(false);
     }
 
+    /**
+     * 页面一直停在前台时也要能自愈：onResume 只触发一次，服务被厂商清理后
+     * ticker 仍是活的。这里做 10 秒节流，避免启动失败时每秒重试。
+     */
+    private void recoverServiceIfNeeded() {
+        if (!Prefs.enabled(this) || Prefs.server(this).trim().length() == 0) return;
+        if (isAlive()) return;
+        long now = System.currentTimeMillis();
+        if (now - lastRecoveryAttemptAt < 10000L) return;
+        lastRecoveryAttemptAt = now;
+        Prefs.setConnectionState(this, Prefs.CONNECTION_CONNECTING);
+        LedService.start(this, Prefs.ACTION_RESTORE);
+    }
+
     private void requestIdleOverlayCleanup() {
-        if (isTv()) {
-            Prefs.store(this).edit()
-                    .putLong(Prefs.KEY_OVERLAY_CLEANUP_REQUEST, System.currentTimeMillis())
-                    .apply();
-            return;
-        }
-        if (isServiceRunning(LedService.class.getName())) {
-            Intent intent = new Intent(this, LedService.class);
-            intent.setAction(Prefs.ACTION_CLEAN_IDLE_OVERLAY);
-            startService(intent);
-        }
+        if (!isAlive()) return;
+        LedService.start(this, Prefs.ACTION_CLEAN_IDLE_OVERLAY);
     }
 
-    private boolean isClientActiveEnough() {
-        String state = Prefs.connectionState(this);
-        boolean connectedOrConnecting = Prefs.CONNECTION_CONNECTED.equals(state)
-                || Prefs.CONNECTION_CONNECTING.equals(state);
-        if (isTv()) {
-            return Prefs.running(this) && isAccessibilityServiceEnabled() && connectedOrConnecting;
-        }
-        return Prefs.running(this) && isServiceRunning(LedService.class.getName()) && connectedOrConnecting;
-    }
-
-    private boolean isServiceRunning(String serviceName) {
-        ActivityManager am = (ActivityManager) getSystemService(ACTIVITY_SERVICE);
-        if (am == null) return false;
-        List<ActivityManager.RunningServiceInfo> services = am.getRunningServices(Integer.MAX_VALUE);
-        if (services == null) return false;
-        for (int i = 0; i < services.size(); i++) {
-            ActivityManager.RunningServiceInfo info = services.get(i);
-            if (info != null && info.service != null && serviceName.equals(info.service.getClassName())) {
-                return true;
-            }
-        }
-        return false;
+    /** 真实存活判断：enabled 是意图，心跳才是服务此刻是否还活着。 */
+    private boolean isAlive() {
+        return Prefs.enabled(this) && Prefs.isHeartbeatFresh(this);
     }
 
     private void saveServerSettings(boolean restartIfRunning) {
@@ -1216,14 +1218,17 @@ public class MainActivity extends Activity {
         if (serverInput != null)
             serverInput.setText(displayAddress(Prefs.server(this)));
         refreshServerSuggestions();
-        if (restartIfRunning && Prefs.running(this) && serverChanged) {
-            Prefs.setConnectionState(this, Prefs.CONNECTION_CONNECTING);
-            if (!isTv()) {
-                Intent start = new Intent(this, LedService.class);
-                start.setAction(Prefs.ACTION_START);
-                if (Build.VERSION.SDK_INT >= 26) startForegroundService(start);
-                else startService(start);
+        if (restartIfRunning && Prefs.enabled(this) && serverChanged) {
+            if (server.length() == 0) {
+                // 地址被清空后没有可连接目标，直接按“停止”处理，避免留下一个假连接状态。
+                LedService.stop(this);
+                updateRunButton(false);
+                updateStatus(false);
+                updateServerStatusCard();
+                return;
             }
+            Prefs.setConnectionState(this, Prefs.CONNECTION_CONNECTING);
+            LedService.start(this, Prefs.ACTION_RESTORE);
             updateServerStatusCard();
         }
     }
@@ -1242,90 +1247,43 @@ public class MainActivity extends Activity {
             showTip(getString(R.string.toast_server_empty), false);
             return;
         }
-        if (isTv()) {
-            if (!isAccessibilityServiceEnabled()) {
-                if (showToast) showTip(getString(R.string.accessibility_permission), false);
-                if (showToast) openAccessibilitySettings();
-                return;
-            }
-            boolean wasRunning = Prefs.running(this);
-            stopService(new Intent(this, LedService.class));
-            SharedPreferences.Editor editor = Prefs.store(this).edit()
-                    .putBoolean(Prefs.KEY_RUNNING, true);
-            if (!wasRunning) editor.putString(Prefs.KEY_CONNECTION_STATE, Prefs.CONNECTION_CONNECTING);
-            editor.apply();
-            updateRunButton(true);
-            updateStatus(true);
-            updateServerStatusCard();
-            if (page == 0) renderHome();
-            if (showToast) showTip(getString(R.string.toast_started), true);
-            return;
+        requestStartupPermissions(showToast);
+
+        // 悬浮窗和通知使用权缺一项都还能“连上”，但要么显示不出来、要么被杀后没人复活。
+        // 这里只提示、不阻止启动，避免用户因为暂时没执行 ADB 就完全无法使用。
+        if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(this) && showToast) {
+            showTip(getString(R.string.overlay_permission), false);
         }
-        if (!requestStartupPermissions(showToast)) return;
-        boolean wasRunning = Prefs.running(this);
-        Intent intent = new Intent(this, LedService.class);
-        intent.setAction(Prefs.ACTION_START);
-        if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent);
-        else startService(intent);
-        SharedPreferences.Editor editor = Prefs.store(this).edit()
-                .putBoolean(Prefs.KEY_RUNNING, true);
-        if (!wasRunning) editor.putString(Prefs.KEY_CONNECTION_STATE, Prefs.CONNECTION_CONNECTING);
-        editor.apply();
+        if (!isNotificationListenerEnabled() && showToast) {
+            showTip(getString(R.string.notification_access_permission), false);
+        }
+
+        // 电视和手机走同一条路径：LedService 是唯一 WebSocket/悬浮窗宿主。
+        Prefs.setEnabled(this, true);
+        Prefs.setConnectionState(this, Prefs.CONNECTION_CONNECTING);
+        LedService.start(this, Prefs.ACTION_START);
         updateRunButton(true);
-        updateStatus(true);
+        updateStatus(isAlive());
         updateServerStatusCard();
         if (page == 0) renderHome();
         if (showToast) showTip(getString(R.string.toast_started), true);
     }
 
-    private boolean requestStartupPermissions(boolean showToast) {
-        if (isTv()) return true;
+    private void requestStartupPermissions(boolean showToast) {
+        // 只在用户主动点“启动”时申请，避免每次打开应用都弹一次系统权限框。
+        if (!showToast) return;
         if (Build.VERSION.SDK_INT >= 33
                 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[] {"android.permission.POST_NOTIFICATIONS"}, 10);
-            if (showToast) showTip(getString(R.string.notification_permission), false);
-            return false;
+            showTip(getString(R.string.notification_permission), false);
         }
-        if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(this)
-                && !isTv()) {
-            if (showToast) showTip(getString(R.string.overlay_permission), false);
-            try {
-                Intent intent = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                        Uri.parse("package:" + getPackageName()));
-                startActivity(intent);
-            } catch (Exception e) {
-                openAppDetailsSettings();
-            }
-            return false;
-        }
-        if (Build.VERSION.SDK_INT >= 23 && !isTv()) {
-            PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
-            if (pm != null && !pm.isIgnoringBatteryOptimizations(getPackageName())) {
-                Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                        Uri.parse("package:" + getPackageName()));
-                try {
-                    startActivity(intent);
-                } catch (Exception ignored) {
-                    try {
-                        startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
-                    } catch (Exception ignored2) {
-                        openAppDetailsSettings();
-                    }
-                }
-            }
-        }
-        return true;
     }
 
     private void stopClient() {
-        Intent intent = new Intent(this, LedService.class);
-        intent.setAction(Prefs.ACTION_STOP);
-        if (!isTv()) startService(intent);
-        else stopService(new Intent(this, LedService.class));
-        Prefs.store(this).edit()
-                .putBoolean(Prefs.KEY_RUNNING, false)
-                .putString(Prefs.KEY_CONNECTION_STATE, Prefs.CONNECTION_DISCONNECTED)
-                .apply();
+        // 先清用户意图，再停服务：即使 stopService 的 onDestroy 里发生意外，
+        // 通知监听锚点也不会把“用户刚按下的停止”重新拉起来。
+        Prefs.setEnabled(this, false);
+        LedService.stop(this);
         updateRunButton(false);
         updateStatus(false);
         updateServerStatusCard();
@@ -1333,28 +1291,49 @@ public class MainActivity extends Activity {
         showTip(getString(R.string.toast_stopped), true);
     }
 
-    private void updateRunButton(boolean running) {
+    private void updateRunButton(boolean enabled) {
         if (runButton == null) return;
-        runButton.setText(running ? getString(R.string.stop) : getString(R.string.start));
-        int color = running ? COLOR_RED : COLOR_GREEN;
+        runButton.setText(enabled ? getString(R.string.stop) : getString(R.string.start));
+        int color = enabled ? COLOR_RED : COLOR_GREEN;
         runButton.setTag(Integer.valueOf(color));
         setRoundedBg(runButton, color, dp(12));
         if (runButton.hasFocus()) applyActionFocusStyle(runButton, true);
     }
 
-    private void updateStatus(boolean running) {
+    private void updateStatus(boolean alive) {
         if (statusDot == null || statusText == null) return;
+        boolean enabled = Prefs.enabled(this);
+        int color;
+        int label;
+        if (alive) {
+            color = COLOR_GREEN;
+            label = R.string.client_running;
+        } else if (enabled) {
+            // 用户开着但心跳过期：不是“已停止”，而是进程被系统杀掉、锚点正在恢复。
+            color = COLOR_ACCENT;
+            label = R.string.client_recovering;
+        } else {
+            color = COLOR_RED;
+            label = R.string.client_stopped;
+        }
         GradientDrawable dotBg = new GradientDrawable();
         dotBg.setShape(GradientDrawable.OVAL);
-        dotBg.setColor(running ? COLOR_GREEN : COLOR_RED);
+        dotBg.setColor(color);
         setBackgroundCompat(statusDot, dotBg);
-        statusText.setText(running ? getString(R.string.client_running) : getString(R.string.client_stopped));
-        statusText.setTextColor(running ? COLOR_GREEN : COLOR_RED);
+        statusText.setText(label);
+        statusText.setTextColor(color);
     }
 
     private void updateServerStatusCard() {
         if (serverStatusTitle == null || serverStatusBadge == null) return;
-        String state = Prefs.running(this) ? Prefs.connectionState(this) : Prefs.CONNECTION_DISCONNECTED;
+        String state;
+        if (!Prefs.enabled(this)) {
+            state = Prefs.CONNECTION_DISCONNECTED;
+        } else if (!Prefs.isHeartbeatFresh(this)) {
+            state = Prefs.CONNECTION_CONNECTING;
+        } else {
+            state = Prefs.connectionState(this);
+        }
         int color;
         int label;
         if (Prefs.CONNECTION_CONNECTED.equals(state)) {
@@ -1422,29 +1401,32 @@ public class MainActivity extends Activity {
             }
         } catch (Exception e) {
             showTip(getString(R.string.toast_open_settings_failed, e.getMessage()), false);
-            openAppDetailsSettings();
+            if (isTv()) showTvHelp();
+            else openAppDetailsSettings();
         }
     }
 
-    private void openAccessibilitySettings() {
+    private void openNotificationListenerSettings() {
         try {
-            startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+            startActivity(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS));
         } catch (Exception e) {
-            if (isTv()) {
-                showTip(getString(R.string.toast_accessibility_settings_unavailable), false);
-                page = 2;
-                renderCurrentPage();
-                if (scrollView != null) {
-                    scrollView.post(new Runnable() {
-                        @Override public void run() {
-                            scrollView.smoothScrollTo(0, contentArea == null ? 0 : contentArea.getHeight());
-                        }
-                    });
+            // 小米 Android 11 固件直接没有这个页面（quizgate D1 实测 resolve 不到），
+            // 只能把用户带到关于页，用 ADB 命令开启。
+            showTip(getString(R.string.toast_open_settings_failed, e.getMessage()), false);
+            if (isTv()) showTvHelp();
+            else openAppDetailsSettings();
+        }
+    }
+
+    private void showTvHelp() {
+        page = 2;
+        renderCurrentPage();
+        if (scrollView != null) {
+            scrollView.post(new Runnable() {
+                @Override public void run() {
+                    scrollView.smoothScrollTo(0, contentArea == null ? 0 : contentArea.getHeight());
                 }
-            } else {
-                showTip(getString(R.string.toast_open_settings_failed, e.getMessage()), false);
-                openAppDetailsSettings();
-            }
+            });
         }
     }
 
@@ -1690,39 +1672,30 @@ public class MainActivity extends Activity {
     //  工具方法
     // ═══════════════════════════════════════════════════════
 
-    /** 检测是否为电视设备（电视无悬浮窗权限开关，需要特殊处理） */
+    /** 检测是否为电视设备：电视通常隐藏系统授权页，需要 ADB 兜底。 */
     private boolean isTv() {
         return getPackageManager().hasSystemFeature(PackageManager.FEATURE_LEANBACK);
     }
 
-    private boolean isAccessibilityServiceEnabled() {
+    /** 通知使用权是否授予。它是强停后的复活锚点，不是可选的通知权限。 */
+    private boolean isNotificationListenerEnabled() {
+        if (Build.VERSION.SDK_INT < 18) return false;
         String enabled = Settings.Secure.getString(getContentResolver(),
-                Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
+                "enabled_notification_listeners");
         if (enabled == null || enabled.length() == 0) return false;
-        String expectedShort = getPackageName() + "/.LedAccessibilityService";
-        String expectedLong = getPackageName() + "/" + LedAccessibilityService.class.getName();
+        // 这里用字符串比较而不是 LedNotifProbe.class：minSdk 14，
+        // 在 API 18 以下加载 NotificationListenerService 子类会直接 NoClassDefFoundError。
+        String targetClass = getPackageName() + ".LedNotifProbe";
         String[] services = enabled.split(":");
         for (int i = 0; i < services.length; i++) {
-            String service = services[i];
-            if (expectedShort.equals(service) || expectedLong.equals(service)) return true;
-            ComponentName component = ComponentName.unflattenFromString(service);
+            ComponentName component = ComponentName.unflattenFromString(services[i]);
             if (component != null
                     && getPackageName().equals(component.getPackageName())
-                    && LedAccessibilityService.class.getName().equals(component.getClassName())) {
+                    && targetClass.equals(component.getClassName())) {
                 return true;
             }
         }
         return false;
-    }
-
-    private String accessibilityAppendCommand(String pkg) {
-        String service = pkg + "/.LedAccessibilityService";
-        return "adb shell 'OLD=$(settings get secure enabled_accessibility_services); "
-                + "S=\"" + service + "\"; "
-                + "if [ \"$OLD\" = \"null\" ] || [ -z \"$OLD\" ]; then "
-                + "settings put secure enabled_accessibility_services \"$S\"; "
-                + "elif echo \"$OLD\" | grep -q \"$S\"; then true; "
-                + "else settings put secure enabled_accessibility_services \"$OLD:$S\"; fi'";
     }
 
     private int dp(int value) {

@@ -19,6 +19,7 @@
     <string name="connection_status">Connection status</string>
     <string name="server_address_hint_short">No server address configured</string>
     <string name="client_running">Running</string>
+    <string name="client_recovering">Recovering</string>
     <string name="client_stopped">Stopped</string>
     <string name="server_connected">Connected</string>
     <string name="server_connecting">Connecting</string>
@@ -32,7 +33,7 @@
     <string name="permission_status_desc">Tap an item to open the matching system settings page</string>
     <string name="permission_notifications">Notifications</string>
     <string name="permission_overlay">Overlay</string>
-    <string name="permission_accessibility">Accessibility service</string>
+    <string name="permission_notification_access">Notification access</string>
     <string name="permission_battery">Battery optimization</string>
     <string name="permission_boot">Start on boot</string>
     <string name="permission_granted">Granted</string>
@@ -43,11 +44,10 @@
     <string name="permission_not_ignored">Not ignored</string>
     <string name="permission_not_required">Not required</string>
     <string name="toast_open_settings_failed">Unable to open settings: %1$s</string>
-    <string name="toast_accessibility_settings_unavailable">This TV has no accessibility settings entry. Use the ADB script shown on the About page.</string>
-    <string name="copy_all">Copy all</string>
+    <string name="copy_all">Copy recent</string>
     <string name="clear_logs">Clear logs</string>
     <string name="overlay_permission">Overlay permission is required to show messages above other apps.</string>
-    <string name="accessibility_permission">Enable the LED Overlay accessibility service on this TV first.</string>
+    <string name="notification_access_permission">Notification access is required so the system can revive the client after a force-stop.</string>
     <string name="notification_permission">Notification permission is required to keep the background service running.</string>
     <string name="toast_boot_enabled">Start on boot enabled</string>
     <string name="toast_boot_disabled">Start on boot disabled</string>
@@ -65,12 +65,12 @@
     <string name="log_invalid_message">Invalid message %1$s</string>
     <string name="log_disconnected">Disconnected %1$s</string>
     <string name="log_overlay_add_failed">Overlay add failed %1$s</string>
-    <string name="tv_help_title">TV / No Overlay Settings?</string>
-    <string name="tv_help_desc">If your device lacks the overlay permission switch, use ADB commands below (connect first via adb connect IP):</string>
+    <string name="tv_help_title">TV / Keep-Alive Grants</string>
+    <string name="tv_help_desc">Xiaomi TVs hide the overlay and notification-access pages. Connect with adb first, then run:</string>
     <string name="tv_adb_command">adb shell appops set %s SYSTEM_ALERT_WINDOW allow</string>
-    <string name="tv_adb_command2">adb shell appops set %s RUN_IN_BACKGROUND allow</string>
+    <string name="tv_adb_command2">adb shell cmd notification allow_listener %s</string>
     <string name="tv_adb_command3">adb shell appops set %s RUN_ANY_IN_BACKGROUND allow</string>
-    <string name="tv_adb_command5">adb shell settings put secure accessibility_enabled 1</string>
-    <string name="copy_adb">Copy all 5 ADB commands</string>
-    <string name="toast_adb_copied">5 ADB commands copied</string>
+    <string name="tv_adb_command4">adb shell settings get secure enabled_notification_listeners</string>
+    <string name="copy_adb">Copy all 4 ADB commands</string>
+    <string name="toast_adb_copied">4 ADB commands copied</string>
 </resources>

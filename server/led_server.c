@@ -28,6 +28,10 @@
 #define WS_TEXT_CAP 32768
 #define STATE_LINE_CAP 65536
 #define STATE_BROADCAST_CAP 1048576
+#define MAX_LOGIN_ATTEMPTS 1024
+#define TASK_TTL_SECONDS (7 * 24 * 3600)
+#define MAX_CONNECTIONS 256
+#define MAX_SESSIONS 256
 
 typedef struct Task {
     char id[32];
@@ -49,6 +53,7 @@ typedef struct Client {
     char key[80];
     char name[128];
     char addr[128];
+    char secret[64];
     Task *tasks;
     struct Client *next;
 } Client;
@@ -93,8 +98,13 @@ static const char *STATE_TMP = "/var/lib/led-overlay/state.db.tmp";
 static Session *sessions = NULL;
 static LoginAttempt *login_attempts = NULL;
 static pthread_mutex_t auth_lock = PTHREAD_MUTEX_INITIALIZER;
+static int active_connections = 0;
+static time_t hello_second = 0;
+static int hello_count = 0;
 static char password_hash[64] = {0};   /* hex 编码的 SHA1 密码 */
 static char home_path[256] = "/";      /* 管理主页路径，默认 / */
+/* 默认不信任转发头：否则任何客户端都能用 X-Real-IP 伪造成千上万个 IP 绕过登录锁定。 */
+static int trust_proxy = 0;
 
 /* ── 登录页 HTML（日间/黑夜自适应） ────────────────────── */
 static const char LOGIN_CARD_TOP[] =
@@ -213,6 +223,7 @@ static void print_help(const char *prog) {
         "  -a <地址>              监听地址，默认 0.0.0.0\n"
         "  -p <端口>              监听端口，默认 12366\n"
         "  --home-path <路径>     管理主页隐藏路径，默认 /\n"
+        "  --trust-proxy          信任 X-Real-IP/X-Forwarded-For（仅反代部署时启用）\n"
         "  -P, --default-password <密码>\n"
         "                         状态文件缺失或无密码时使用的默认密码，默认 admin\n"
         "  --reset-password <密码> 重置管理密码后退出\n"
@@ -228,7 +239,9 @@ static void log_line(const char *fmt, ...) {
     time_t now = time(NULL);
     char ts[32];
     char msg[1024];
-    strftime(ts, sizeof(ts), "%F %T", localtime(&now));
+    struct tm tm_now;
+    localtime_r(&now, &tm_now);
+    strftime(ts, sizeof(ts), "%F %T", &tm_now);
     va_start(ap, fmt);
     vsnprintf(msg, sizeof(msg), fmt, ap);
     va_end(ap);
@@ -247,13 +260,15 @@ static void add_event_locked(const char *fmt, ...) {
     vsnprintf(text, sizeof(text), fmt, ap);
     va_end(ap);
     syslog(LOG_INFO, "%s", text);
+    struct tm tm_now;
+    localtime_r(&now, &tm_now);
     if (!entry) {
         char ts[32];
-        strftime(ts, sizeof(ts), "%F %T", localtime(&now));
+        strftime(ts, sizeof(ts), "%F %T", &tm_now);
         fprintf(stderr, "[%s] %s\n", ts, text);
         return;
     }
-    strftime(entry->time, sizeof(entry->time), "%F %T", localtime(&now));
+    strftime(entry->time, sizeof(entry->time), "%F %T", &tm_now);
     snprintf(entry->text, sizeof(entry->text), "%s", text);
     fprintf(stderr, "[%s] %s\n", entry->time, entry->text);
     if (!logs) logs = entry;
@@ -380,32 +395,61 @@ static int ws_send(int fd, const char *text) {
     return send_all(fd, head, (size_t)n) && send_all(fd, text, len);
 }
 
+static int ws_send_pong(int fd, const unsigned char *payload, size_t len) {
+    unsigned char head[2] = {0x8A, (unsigned char)len};
+    /* ws_read 在任务发送锁之外执行；pong 必须和任务帧/广播帧串行写，否则同一
+       fd 上会出现两帧字节交错，客户端直接解析失败。 */
+    pthread_mutex_lock(&lock);
+    int ok = send_all(fd, head, 2) && send_all(fd, (const char *)payload, len);
+    pthread_mutex_unlock(&lock);
+    return ok;
+}
+
 static int ws_read(int fd, char *out, size_t cap) {
-    unsigned char h[2], mask[4];
-    if (recv(fd, h, 2, MSG_WAITALL) != 2) return 0;
-    int opcode = h[0] & 15;
-    uint64_t len = h[1] & 127;
-    if (len == 126) { unsigned char e[2]; if (recv(fd, e, 2, MSG_WAITALL) != 2) return 0; len = e[0] << 8 | e[1]; }
-    else if (len == 127) { unsigned char e[8]; if (recv(fd, e, 8, MSG_WAITALL) != 8) return 0; len = 0; for (int i = 0; i < 8; i++) len = (len << 8) | e[i]; }
-    int masked = h[1] & 128;
-    if (masked && recv(fd, mask, 4, MSG_WAITALL) != 4) return 0;
-    size_t keep = len < cap ? (size_t)len : cap - 1;
-    size_t off = 0;
-    while (off < len) {
-        unsigned char chunk[2048];
-        size_t want = len - off;
-        if (want > sizeof(chunk)) want = sizeof(chunk);
-        if (recv(fd, chunk, want, MSG_WAITALL) != (ssize_t)want) return 0;
-        if (masked) for (size_t i = 0; i < want; i++) chunk[i] ^= mask[(off + i) % 4];
-        if (off < keep) {
-            size_t copy = keep - off;
-            if (copy > want) copy = want;
-            memcpy(out + off, chunk, copy);
+    if (!out || cap == 0) return 0;
+    for (;;) {
+        unsigned char h[2], mask[4];
+        if (recv(fd, h, 2, MSG_WAITALL) != 2) return 0;
+        int opcode = h[0] & 15;
+        uint64_t len = h[1] & 127;
+        if (len == 126) { unsigned char e[2]; if (recv(fd, e, 2, MSG_WAITALL) != 2) return 0; len = e[0] << 8 | e[1]; }
+        else if (len == 127) { unsigned char e[8]; if (recv(fd, e, 8, MSG_WAITALL) != 8) return 0; len = 0; for (int i = 0; i < 8; i++) len = (len << 8) | e[i]; }
+        /* 无认证的 /client 可以伪造超大长度；没有上限时线程会一直读/丢弃到超时。
+           当前协议最大文本为 JSON，1MB 足够，超过直接断开。 */
+        if (len > 1024 * 1024) return 0;
+        int masked = h[1] & 128;
+        if (masked && recv(fd, mask, 4, MSG_WAITALL) != 4) return 0;
+
+        /* 标准 ping/pong 控制帧：反代或浏览器可能发，不能当成非法帧断开。 */
+        if (opcode == 8) return 0;
+        if (opcode == 9 || opcode == 10) {
+            if (len > 125) return 0;
+            unsigned char ctrl[125];
+            if (len && recv(fd, ctrl, len, MSG_WAITALL) != (ssize_t)len) return 0;
+            if (masked) for (size_t i = 0; i < len; i++) ctrl[i] ^= mask[i % 4];
+            if (opcode == 9 && !ws_send_pong(fd, ctrl, len)) return 0;
+            continue;
         }
-        off += want;
+        if (opcode != 1) return 0;
+
+        size_t keep = len < cap ? (size_t)len : cap - 1;
+        size_t off = 0;
+        while (off < len) {
+            unsigned char chunk[2048];
+            size_t want = len - off;
+            if (want > sizeof(chunk)) want = sizeof(chunk);
+            if (recv(fd, chunk, want, MSG_WAITALL) != (ssize_t)want) return 0;
+            if (masked) for (size_t i = 0; i < want; i++) chunk[i] ^= mask[(off + i) % 4];
+            if (off < keep) {
+                size_t copy = keep - off;
+                if (copy > want) copy = want;
+                memcpy(out + off, chunk, copy);
+            }
+            off += want;
+        }
+        out[keep] = 0;
+        return 1;
     }
-    out[keep] = 0;
-    return opcode == 1;
 }
 
 static void set_socket_timeouts(int fd) {
@@ -413,6 +457,8 @@ static void set_socket_timeouts(int fd) {
     tv.tv_sec = 60;
     tv.tv_usec = 0;
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    /* 慢客户端不能把全局锁占满 60 秒；发送失败后由连接线程自己关闭。 */
+    tv.tv_sec = 5;
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 }
 
@@ -424,14 +470,33 @@ static void clear_socket_read_timeout(int fd) {
 }
 
 /* ── JSON 辅助 ─────────────────────────────────────────── */
+/* 只匹配真正的对象键，跳过字符串值内部。旧实现用 strstr 找 "taskId"，
+   detail/text 里出现转义的 \"taskId\" 时会把 ACK 指向错误任务。 */
+static const char *json_find_value(const char *json, const char *key) {
+    size_t key_len = strlen(key);
+    const char *p = json;
+    while (*p) {
+        if (*p != '"') { p++; continue; }
+        const char *start = ++p;
+        while (*p) {
+            if (*p == '\\' && p[1]) { p += 2; continue; }
+            if (*p == '"') break;
+            p++;
+        }
+        if (*p != '"') return NULL;
+        const char *after = p + 1;
+        const char *q = after;
+        while (*q == ' ' || *q == '\t' || *q == '\r' || *q == '\n') q++;
+        if ((size_t)(p - start) == key_len && strncmp(start, key, key_len) == 0 && *q == ':') return q + 1;
+        p++;
+    }
+    return NULL;
+}
+
 static void json_value(const char *json, const char *key, char *out, size_t cap) {
-    char pat[64];
-    snprintf(pat, sizeof(pat), "\"%s\"", key);
-    char *p = strstr((char *)json, pat);
+    if (!out || cap == 0) return;
+    const char *p = json_find_value(json, key);
     if (!p) { *out = 0; return; }
-    p = strchr(p, ':');
-    if (!p) { *out = 0; return; }
-    p++;
     while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
     size_t i = 0;
     if (*p == '"') {
@@ -557,10 +622,15 @@ static void html_esc(char *out, size_t cap, const char *in) {
     out[p] = 0;
 }
 
-static void append_text(char *out, size_t cap, const char *text) {
+static int append_text(char *out, size_t cap, const char *text) {
     size_t used = strlen(out);
-    if (used + 1 >= cap) return;
-    strncat(out, text, cap - used - 1);
+    size_t len = strlen(text);
+    /* 不能 strncat 截半：广播缓冲区满时会在 JSON 字符串/对象中间截断，
+       管理页 JSON.parse 抛异常后就不再刷新。放不下就整段丢弃，由调用方
+       决定停止追加并正常闭合数组。 */
+    if (used + len >= cap) return 0;
+    memcpy(out + used, text, len + 1);
+    return 1;
 }
 
 static void copy_cstr(char *out, size_t cap, const char *in) {
@@ -601,6 +671,10 @@ static void header_value(const char *header, const char *name, char *out, size_t
 }
 
 static void real_ip_from_header(const char *header, const char *peer, char *out, size_t cap) {
+    if (!trust_proxy) {
+        copy_cstr(out, cap, peer && peer[0] ? peer : "unknown");
+        return;
+    }
     const char *names[] = {
         "CF-Connecting-IP",
         "X-Real-IP",
@@ -781,12 +855,25 @@ static int should_apply_ack_status(const Task *t, const char *status) {
     return incoming >= current;
 }
 
+static int valid_color(const char *v) {
+    if (!v || v[0] != '#') return 0;
+    size_t n = strlen(v);
+    if (n != 7 && n != 9) return 0;
+    for (size_t i = 1; i < n; i++) {
+        char c = v[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return 0;
+    }
+    return 1;
+}
+
 static int send_task(Client *c, Task *t) {
     if (!c || !t || !c->online || c->fd < 0) return 0;
     char msg[TASK_TEXT_CAP * 2 + 512], et[TASK_TEXT_CAP * 2];
+    const char *bg = valid_color(t->background) ? t->background : "#000000";
+    const char *fg = valid_color(t->foreground) ? t->foreground : "#ff0000";
     esc(et, sizeof(et), t->text);
     snprintf(msg, sizeof(msg), "{\"type\":\"message\",\"taskId\":\"%s\",\"text\":\"%s\",\"background\":\"%s\",\"foreground\":\"%s\",\"speed\":%d,\"loops\":%d}",
-             t->id, et, t->background, t->foreground, t->speed, t->loops);
+             t->id, et, bg, fg, t->speed, t->loops);
     if (ws_send(c->fd, msg)) {
         set_task_status_detail(t, "sent", "服务端已下发，等待客户端接收确认");
         return 1;
@@ -798,9 +885,11 @@ static int send_task(Client *c, Task *t) {
 static int resend_task_payload(Client *c, Task *t, const char *detail) {
     if (!c || !t || !c->online || c->fd < 0) return 0;
     char msg[TASK_TEXT_CAP * 2 + 512], et[TASK_TEXT_CAP * 2];
+    const char *bg = valid_color(t->background) ? t->background : "#000000";
+    const char *fg = valid_color(t->foreground) ? t->foreground : "#ff0000";
     esc(et, sizeof(et), t->text);
     snprintf(msg, sizeof(msg), "{\"type\":\"message\",\"taskId\":\"%s\",\"text\":\"%s\",\"background\":\"%s\",\"foreground\":\"%s\",\"speed\":%d,\"loops\":%d}",
-             t->id, et, t->background, t->foreground, t->speed, t->loops);
+             t->id, et, bg, fg, t->speed, t->loops);
     if (ws_send(c->fd, msg)) {
         if (detail && detail[0]) snprintf(t->detail, sizeof(t->detail), "%s", detail);
         t->updated_at = time(NULL);
@@ -820,18 +909,44 @@ static void cancel_task(Client *c, const char *task_id) {
 
 static void send_next_task(Client *c) {
     if (!c || !c->online) return;
+    /* 有任务处于 sent/received/displaying 时先等它完成，避免一次灌多条；
+       否则客户端队列还没消化，管理员连续点击就会把全局锁拖在多次 send 上。 */
     for (Task *t = c->tasks; t; t = t->next) {
-        if (strcmp(t->status, "pending") == 0 && !send_task(c, t)) return;
+        if (is_active_status(t->status)) return;
+    }
+    for (Task *t = c->tasks; t; t = t->next) {
+        if (strcmp(t->status, "pending") == 0) {
+            send_task(c, t);
+            return;
+        }
     }
 }
 
 static void send_active_or_next_task(Client *c) {
     if (!c || !c->online) return;
     for (Task *t = c->tasks; t; t = t->next) {
-        if (is_active_status(t->status)
-                && !resend_task_payload(c, t, "客户端重连，服务端重新下发任务以确认状态")) return;
+        if (is_active_status(t->status)) {
+            resend_task_payload(c, t, "客户端重连，服务端重新下发任务以确认状态");
+            return;
+        }
     }
     send_next_task(c);
+}
+
+/* 旧版本一次会下发多条，升级后可能同时存在多个 active 任务。
+   优先保留 displaying/received（客户端正在处理），其余重新排队；否则
+   send_next_task 会被其他 active 永久挡住。 */
+static void normalize_active_tasks(Client *c) {
+    if (!c) return;
+    Task *keep = NULL;
+    for (Task *t = c->tasks; t; t = t->next) {
+        if (!is_active_status(t->status)) continue;
+        if (!keep || ack_status_rank(t->status) > ack_status_rank(keep->status)) keep = t;
+    }
+    for (Task *t = c->tasks; t; t = t->next) {
+        if (t == keep || !is_active_status(t->status)) continue;
+        set_task_status_detail(t, "pending", "检测到多条未完成任务，重新排队");
+    }
 }
 
 static Task *clone_task_as_new(Task *src) {
@@ -848,9 +963,28 @@ static Task *clone_task_as_new(Task *src) {
 }
 
 /* ── 状态持久化 ────────────────────────────────────────── */
+/* 已完成/失败的任务保留 7 天，避免任务无限累积把广播撑到 1MB 上限。 */
+static void prune_tasks_locked(void) {
+    time_t now = time(NULL);
+    for (Client *c = clients; c; c = c->next) {
+        Task **pp = &c->tasks;
+        while (*pp) {
+            Task *t = *pp;
+            if (is_terminal_status(t->status) && now - t->updated_at > TASK_TTL_SECONDS) {
+                *pp = t->next;
+                free(t);
+            } else {
+                pp = &t->next;
+            }
+        }
+    }
+}
+
 static void save_state_locked(void) {
-    if (mkdir(STATE_DIR, 0755) < 0 && errno != EEXIST)
+    prune_tasks_locked();
+    if (mkdir(STATE_DIR, 0700) < 0 && errno != EEXIST)
         { log_line("数据库目录不可用 %s：%s", STATE_DIR, strerror(errno)); return; }
+    chmod(STATE_DIR, 0700);
     FILE *f = fopen(STATE_TMP, "w");
     if (!f) { log_line("数据写入失败 %s：%s", STATE_TMP, strerror(errno)); return; }
     fprintf(f, "NEXT\t%d\t%d\n", next_client_id, next_task_id);
@@ -877,11 +1011,22 @@ static void save_state_locked(void) {
         hex_encode(f, l->time); fputc('\t', f);
         hex_encode(f, l->text); fputc('\n', f);
     }
-    /* 保存密码 hash */
-    if (password_hash[0]) fprintf(f, "PASS\t%s\n", password_hash);
+    /* 保存密码 hash。写 hash 在 auth_lock 下，保存文件在 lock 下；
+       这里必须先取 auth_lock 再读，避免读到改密码过程中写了一半的 hash。 */
+    char pw_hash[64] = {0};
+    pthread_mutex_lock(&auth_lock);
+    snprintf(pw_hash, sizeof(pw_hash), "%s", password_hash);
+    pthread_mutex_unlock(&auth_lock);
+    if (pw_hash[0]) fprintf(f, "PASS\t%s\n", pw_hash);
+    fflush(f);
+    fsync(fileno(f));
     fclose(f);
+    chmod(STATE_TMP, 0600);
     if (rename(STATE_TMP, STATE_FILE) < 0)
         log_line("数据文件替换失败：%s", strerror(errno));
+    /* 目录项也要 fsync，否则掉电后 rename 可能丢失。 */
+    int dfd = open(STATE_DIR, O_RDONLY | O_DIRECTORY);
+    if (dfd >= 0) { fsync(dfd); close(dfd); }
 }
 
 static void load_state(void) {
@@ -946,6 +1091,10 @@ static void load_state(void) {
 
 /* ── WebSocket 握手 ───────────────────────────────────── */
 static int websocket_handshake(int fd, const char *header) {
+    /* RFC 6455 只接受版本 13；用 header_value 解析，允许冒号后没有空格。 */
+    char version[16] = {0};
+    header_value(header, "Sec-WebSocket-Version", version, sizeof(version));
+    if (strcmp(version, "13") != 0) return 0;
     char *p = strcasestr((char *)header, "Sec-WebSocket-Key:");
     if (!p) return 0;
     p += 18;
@@ -961,14 +1110,15 @@ static int websocket_handshake(int fd, const char *header) {
     base64(digest, 20, accept);
     char resp[256];
     snprintf(resp, sizeof(resp), "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n", accept);
-    return send(fd, resp, strlen(resp), MSG_NOSIGNAL) > 0;
+    return send_all(fd, resp, strlen(resp));
 }
 
 /* ── 广播状态（前向声明） ──────────────────────────────── */
 static void broadcast_state(void);
 
 /* ── Admin WebSocket 处理 ──────────────────────────────── */
-static void handle_admin(int fd) {
+static void handle_admin(int fd, time_t session_expires) {
+    if (session_expires <= 0) return;
     Admin admin = {.fd = fd};
     pthread_mutex_lock(&lock);
     admin.next = admins; admins = &admin;
@@ -976,17 +1126,24 @@ static void handle_admin(int fd) {
     broadcast_state();
     char buf[WS_TEXT_CAP];
     while (ws_read(fd, buf, sizeof(buf))) {
+        /* 握手后 token 可能已经过期；每个命令执行前都复核，避免旧标签页无限期下发任务。 */
+        if (session_expires > 0 && time(NULL) >= session_expires) break;
         char type[32]; json_value(buf, "type", type, sizeof(type));
         int cid = json_int(buf, "clientId", 0);
         pthread_mutex_lock(&lock);
         Client *c = find_client(cid);
         if (c && strcmp(type, "send") == 0) {
             Task *t = calloc(1, sizeof(Task));
+            if (!t) { pthread_mutex_unlock(&lock); continue; }
             snprintf(t->id, sizeof(t->id), "t%d", next_task_id++);
             json_value(buf, "text", t->text, sizeof(t->text));
-            json_value(buf, "background", t->background, sizeof(t->background)); if (!*t->background) strcpy(t->background, "#000000");
-            json_value(buf, "foreground", t->foreground, sizeof(t->foreground)); if (!*t->foreground) strcpy(t->foreground, "#ff0000");
-            t->speed = json_int(buf, "speed", 90); t->loops = json_int(buf, "loops", json_int(buf, "duration", 1)); if (t->loops <= 0) t->loops = 1; set_task_status_detail(t, "pending", "待发送：等待服务端下发到客户端");
+            json_value(buf, "background", t->background, sizeof(t->background)); if (!valid_color(t->background)) strcpy(t->background, "#000000");
+            json_value(buf, "foreground", t->foreground, sizeof(t->foreground)); if (!valid_color(t->foreground)) strcpy(t->foreground, "#ff0000");
+            t->speed = json_int(buf, "speed", 90); t->loops = json_int(buf, "loops", json_int(buf, "duration", 1));
+            if (t->speed < 10 || t->speed > 1000) t->speed = 90;
+            if (t->loops <= 0) t->loops = 1;
+            if (t->loops > 1000) t->loops = 1000;
+            set_task_status_detail(t, "pending", "待发送：等待服务端下发到客户端");
             append_task(c, t);
             send_next_task(c);
             save_state_locked();
@@ -1031,32 +1188,35 @@ static void handle_admin(int fd) {
 /* ── 广播状态 ─────────────────────────────────────────── */
 static void broadcast_state(void) {
     char *buf = calloc(1, STATE_BROADCAST_CAP);
-    append_text(buf, STATE_BROADCAST_CAP, "{\"type\":\"state\",\"clients\":[");
+    if (!buf) return;
+    append_text(buf, STATE_BROADCAST_CAP - 32, "{\"type\":\"state\",\"clients\":[");
     pthread_mutex_lock(&lock);
+    prune_tasks_locked();
     for (Client *c = clients; c; c = c->next) {
         char en[256], ea[256], ek[160], item[800];
         esc(en, sizeof(en), c->name); esc(ea, sizeof(ea), c->addr); esc(ek, sizeof(ek), c->key);
         snprintf(item, sizeof(item), "%s{\"id\":%d,\"key\":\"%s\",\"name\":\"%s\",\"addr\":\"%s\",\"online\":%s,\"tasks\":[",
                  c == clients ? "" : ",", c->id, ek, en, ea, c->online ? "true" : "false");
-        append_text(buf, STATE_BROADCAST_CAP, item);
+        if (!append_text(buf, STATE_BROADCAST_CAP - 32, item)) break;
         for (Task *t = c->tasks; t; t = t->next) {
             char et[TASK_TEXT_CAP * 2], ed[2048], ti[TASK_TEXT_CAP * 2 + 2300];
             esc(et, sizeof(et), t->text);
             esc(ed, sizeof(ed), t->detail);
             snprintf(ti, sizeof(ti), "%s{\"id\":\"%s\",\"text\":\"%s\",\"status\":\"%s\",\"detail\":\"%s\",\"updatedAt\":%ld}",
                      t == c->tasks ? "" : ",", t->id, et, t->status, ed, (long)t->updated_at);
-            append_text(buf, STATE_BROADCAST_CAP, ti);
+            if (!append_text(buf, STATE_BROADCAST_CAP - 32, ti)) break;
         }
         append_text(buf, STATE_BROADCAST_CAP, "]}");
     }
-    append_text(buf, STATE_BROADCAST_CAP, "],\"logs\":[");
+    append_text(buf, STATE_BROADCAST_CAP - 32, "],\"logs\":[");
     int first_log = 1;
     for (LogEntry *l = logs; l; l = l->next) {
         char et[1024], ts[80], item[1200];
         esc(et, sizeof(et), l->text);
         esc(ts, sizeof(ts), l->time);
         snprintf(item, sizeof(item), "%s{\"time\":\"%s\",\"text\":\"%s\"}", first_log ? "" : ",", ts, et);
-        append_text(buf, STATE_BROADCAST_CAP, item); first_log = 0;
+        if (!append_text(buf, STATE_BROADCAST_CAP - 32, item)) break;
+        first_log = 0;
     }
     append_text(buf, STATE_BROADCAST_CAP, "]}");
     Admin **pp = &admins;
@@ -1065,7 +1225,10 @@ static void broadcast_state(void) {
         if (ws_send(a->fd, buf)) {
             pp = &a->next;
         } else {
-            close(a->fd);
+            /* 不能在这里 close：fd 的属主是 handle_admin 所在线程，跨线程 close 后
+               fd 号可能立刻被 accept 复用，旧线程返回时会再 close 一次，误关新连接。
+               只 shutdown 唤醒属主线程，由它自己 close。 */
+            shutdown(a->fd, SHUT_RDWR);
             *pp = a->next;
         }
     }
@@ -1076,20 +1239,64 @@ static void broadcast_state(void) {
 /* ── 会话管理 ─────────────────────────────────────────── */
 /* 生成随机会话 token */
 static void generate_token(char *out, size_t cap) {
-    time_t now = time(NULL);
-    char input[80];
-    snprintf(input, sizeof(input), "%ld|%d|%d", (long)now, getpid(), rand());
+    /* 旧实现用未播种的 rand()，glibc 下每次启动都是同一序列，知道登录时刻和 pid
+       就能枚举 token。优先读 /dev/urandom；失败时才退回时间/pid 混合种子。 */
+    unsigned char rnd[32];
+    int ok = 0;
+    int fd = open("/dev/urandom", O_RDONLY);
+    if (fd >= 0) {
+        ssize_t got = read(fd, rnd, sizeof(rnd));
+        close(fd);
+        ok = got == (ssize_t)sizeof(rnd);
+    }
+    if (!ok) {
+        unsigned int seed = (unsigned int)time(NULL) ^ (unsigned int)getpid();
+        srand(seed);
+        for (size_t i = 0; i < sizeof(rnd); i++) rnd[i] = (unsigned char)(rand() & 0xff);
+    }
+    static const char *hex = "0123456789abcdef";
+    char input[sizeof(rnd) * 2 + 1];
+    size_t p = 0;
+    for (size_t i = 0; i < sizeof(rnd); i++) {
+        input[p++] = hex[rnd[i] >> 4];
+        input[p++] = hex[rnd[i] & 15];
+    }
+    input[p] = 0;
     sha1_hex(input, out, cap);
 }
 
 /* 创建新会话（30 分钟有效期） */
+static void cleanup_sessions_locked(time_t now) {
+    Session **pp = &sessions;
+    while (*pp) {
+        Session *s = *pp;
+        if (s->expires <= now) { *pp = s->next; free(s); }
+        else pp = &s->next;
+    }
+}
+
 static void create_session(char *token_out, size_t cap) {
     generate_token(token_out, cap);
     Session *s = calloc(1, sizeof(Session));
+    if (!s) return;
     snprintf(s->token, sizeof(s->token), "%s", token_out);
     s->expires = time(NULL) + 1800;  /* 30 分钟 */
 
     pthread_mutex_lock(&auth_lock);
+    cleanup_sessions_locked(time(NULL));
+    int count = 0;
+    Session *prev = NULL;
+    for (Session *it = sessions; it; it = it->next) { count++; prev = it; }
+    if (count >= MAX_SESSIONS && prev) {
+        if (sessions == prev) {
+            sessions = NULL;
+        } else {
+            Session *p = sessions;
+            while (p->next != prev) p = p->next;
+            p->next = NULL;
+        }
+        free(prev);
+    }
     s->next = sessions;
     sessions = s;
     pthread_mutex_unlock(&auth_lock);
@@ -1100,24 +1307,28 @@ static int validate_session(const char *token) {
     if (!token || !token[0]) return 0;
     pthread_mutex_lock(&auth_lock);
     time_t now = time(NULL);
-    Session **pp = &sessions;
-    while (*pp) {
-        Session *s = *pp;
+    cleanup_sessions_locked(now);
+    for (Session *s = sessions; s; s = s->next) {
         if (strcmp(s->token, token) == 0) {
-            if (s->expires > now) {
-                pthread_mutex_unlock(&auth_lock);
-                return 1;
-            }
-            /* 过期，删除 */
-            *pp = s->next;
-            free(s);
+            int valid = s->expires > now;
             pthread_mutex_unlock(&auth_lock);
-            return 0;
+            return valid;
         }
-        pp = &s->next;
     }
     pthread_mutex_unlock(&auth_lock);
     return 0;
+}
+
+static time_t session_expiry(const char *token) {
+    if (!token || !token[0]) return 0;
+    pthread_mutex_lock(&auth_lock);
+    time_t now = time(NULL), expires = 0;
+    cleanup_sessions_locked(now);
+    for (Session *s = sessions; s; s = s->next) {
+        if (strcmp(s->token, token) == 0) { expires = s->expires; break; }
+    }
+    pthread_mutex_unlock(&auth_lock);
+    return expires;
 }
 
 /* 从 HTTP 头中提取 session cookie 并校验 */
@@ -1132,7 +1343,22 @@ static LoginAttempt *login_attempt_for_ip(const char *ip, int create) {
         if (strcmp(a->ip, ip) == 0) return a;
     }
     if (!create) return NULL;
+    /* 攻击者可以不断换真实 IP 制造新节点；限制总数，超限时丢弃最旧节点。 */
+    int count = 0;
+    LoginAttempt *prev = NULL;
+    for (LoginAttempt *it = login_attempts; it; it = it->next) { count++; prev = it; }
+    if (count >= MAX_LOGIN_ATTEMPTS && prev) {
+        if (login_attempts == prev) {
+            login_attempts = NULL;
+        } else {
+            LoginAttempt *p = login_attempts;
+            while (p->next != prev) p = p->next;
+            p->next = NULL;
+        }
+        free(prev);
+    }
     LoginAttempt *a = calloc(1, sizeof(LoginAttempt));
+    if (!a) return NULL;
     snprintf(a->ip, sizeof(a->ip), "%s", ip);
     a->next = login_attempts;
     login_attempts = a;
@@ -1145,7 +1371,12 @@ static int login_locked_seconds(const char *ip) {
     LoginAttempt *a = login_attempt_for_ip(ip, 0);
     int seconds = 0;
     if (a && a->locked_until > now) seconds = (int)(a->locked_until - now);
-    else if (a && a->locked_until <= now) { a->locked_until = 0; a->failures = 0; }
+    /* 只有“锁定已到期”才清零失败次数；locked_until==0 时不能清，
+       否则每次登录前都会把前两次失败抹掉，三次锁定永远触发不了。 */
+    else if (a && a->locked_until != 0 && a->locked_until <= now) {
+        a->locked_until = 0;
+        a->failures = 0;
+    }
     pthread_mutex_unlock(&auth_lock);
     return seconds;
 }
@@ -1162,6 +1393,7 @@ static int record_login_failure(const char *ip) {
     time_t now = time(NULL);
     pthread_mutex_lock(&auth_lock);
     LoginAttempt *a = login_attempt_for_ip(ip, 1);
+    if (!a) { pthread_mutex_unlock(&auth_lock); return 0; }
     if (a->locked_until <= now) a->failures++;
     if (a->failures >= 3) a->locked_until = now + 1800;
     int seconds = a->locked_until > now ? (int)(a->locked_until - now) : 0;
@@ -1228,8 +1460,10 @@ static void send_http(int fd, int status, const char *status_text,
         "%s"
         "\r\n",
         status, status_text, content_type, body_len, extra_headers ? extra_headers : "");
-    send(fd, resp, n, MSG_NOSIGNAL);
-    if (body && body_len > 0) send(fd, body, body_len, MSG_NOSIGNAL);
+    if (n < 0) n = 0;
+    if ((size_t)n >= sizeof(resp)) n = sizeof(resp) - 1;
+    send_all(fd, resp, (size_t)n);
+    if (body && body_len > 0) send_all(fd, body, body_len);
 }
 
 static void send_not_found(int fd) {
@@ -1244,6 +1478,11 @@ static int set_home_path(const char *value) {
     else snprintf(path, sizeof(path), "%s", value);
 
     if (strchr(path, '?') || strchr(path, '#') || strchr(path, '&')) return 0;
+    /* 主页路径会直接拼进 Location 响应头；拒绝控制字符，避免 CRLF 头注入。 */
+    for (const char *p = path; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c < 0x20 || c == 0x7f || c == '\\') return 0;
+    }
     size_t len = strlen(path);
     while (len > 1 && path[len - 1] == '/') path[--len] = 0;
 
@@ -1266,6 +1505,8 @@ static void serve_login_page(int fd, const char *error) {
     } else {
         n = snprintf(html, sizeof(html), "%s%s", LOGIN_CARD_TOP, LOGIN_CARD_BOTTOM);
     }
+    if (n < 0) n = 0;
+    if ((size_t)n >= sizeof(html)) n = sizeof(html) - 1;
     send_http(fd, 200, "OK", "text/html; charset=utf-8", html, n, NULL);
 }
 
@@ -1278,8 +1519,10 @@ static void serve_admin_page(int fd) {
         "Connection: close\r\n"
         "\r\n",
         strlen(app_page_html));
-    send(fd, resp, n, MSG_NOSIGNAL);
-    send(fd, app_page_html, strlen(app_page_html), MSG_NOSIGNAL);
+    if (n < 0) n = 0;
+    if ((size_t)n >= sizeof(resp)) n = sizeof(resp) - 1;
+    send_all(fd, resp, (size_t)n);
+    send_all(fd, app_page_html, strlen(app_page_html));
 }
 
 /* ── 客户端 WebSocket 处理 ────────────────────────────── */
@@ -1291,23 +1534,45 @@ static void handle_client_ws(int fd, const char *addr) {
     json_value(buf, "clientId", key, sizeof(key));
     json_value(buf, "name", name, sizeof(name));
     if (strcmp(type, "hello") != 0 || key[0] == 0) return;
-    clear_socket_read_timeout(fd);
+    /* 客户端心跳由 recv 超时兜底：对端掉线/进电梯/切网时不发 FIN 的半开连接
+       会在 60 秒后读超时退出，避免线程和 fd 永久泄漏。客户端每 20 秒 ping 一次，
+       60 秒足够宽松，不会误伤正常连接。 */
 
     Client *c;
     pthread_mutex_lock(&lock);
+    time_t now_hello = time(NULL);
+    if (now_hello != hello_second) { hello_second = now_hello; hello_count = 0; }
+    if (++hello_count > 100) {
+        pthread_mutex_unlock(&lock);
+        return;
+    }
     c = find_client_key(key);
     if (!c) {
         c = calloc(1, sizeof(Client));
+        if (!c) { pthread_mutex_unlock(&lock); return; }
         c->fd = -1;
         c->id = next_client_id++;
         snprintf(c->key, sizeof(c->key), "%s", key);
         snprintf(c->name, sizeof(c->name), "client-%d", c->id);
         c->next = clients; clients = c;
+    } else if (c->online && c->fd >= 0 && c->fd != fd) {
+        /* 同一个 clientId 建了新连接：旧连接必须 shutdown 掉。
+           否则两条线程共用同一个 Client，旧线程断开时会把 online 置 0，
+           管理员删除离线客户端就可能把仍在使用中的 Client 释放掉。 */
+        shutdown(c->fd, SHUT_RDWR);
     }
     c->fd = fd;
     c->online = 1;
     snprintf(c->addr, sizeof(c->addr), "%s", addr);
     if (name[0]) snprintf(c->name, sizeof(c->name), "%s", name);
+    normalize_active_tasks(c);
+    /* 每次连接下发新的 ACK 密钥：HTTP /client-ack 必须带上它，
+       否则知道 clientId/taskId 的人就能改任务状态。WebSocket 连接本身
+       已经由 hello 建立，WS ACK 不再重复校验。 */
+    generate_token(c->secret, sizeof(c->secret));
+    char hello_ok[160];
+    snprintf(hello_ok, sizeof(hello_ok), "{\"type\":\"hello-ok\",\"secret\":\"%s\"}", c->secret);
+    ws_send(fd, hello_ok);
     add_event_locked("客户端已连接 #%d %s %s", c->id, c->name, c->addr);
     send_active_or_next_task(c);
     save_state_locked();
@@ -1315,8 +1580,17 @@ static void handle_client_ws(int fd, const char *addr) {
     broadcast_state();
     while (ws_read(fd, buf, sizeof(buf))) {
         json_value(buf, "type", type, sizeof(type));
-        if (strcmp(type, "ping") == 0) continue;
+        if (strcmp(type, "ping") == 0) {
+            /* 客户端每 20 秒发一次 ping。回 pong 后客户端才能判断
+               “链路还在但服务端已无响应”的情况并主动重连（2026-11-18 实测需求）。
+               这里沿用全局锁，避免与任务下发帧交错写坏 WebSocket 帧。 */
+            pthread_mutex_lock(&lock);
+            ws_send(fd, "{\"type\":\"pong\"}");
+            pthread_mutex_unlock(&lock);
+            continue;
+        }
         pthread_mutex_lock(&lock);
+        int changed = 0;
         if (strcmp(type, "ack") == 0) {
             char tid[32], status[32], detail[1024];
             json_value(buf, "taskId", tid, sizeof(tid));
@@ -1325,15 +1599,18 @@ static void handle_client_ws(int fd, const char *addr) {
             Task *t = find_task(c, tid);
             if (should_apply_ack_status(t, status)) {
                 int was_terminal = is_terminal_status(t->status);
-                set_task_status_detail(t, status, detail);
+                int real_change = strcmp(t->status, status) != 0
+                        || (detail[0] && strcmp(t->detail, detail) != 0);
+                if (real_change) set_task_status_detail(t, status, detail);
                 if (!was_terminal && is_terminal_status(status)) send_next_task(c);
+                changed = real_change;
             } else if (is_terminal_status(status)) {
                 add_event_locked("客户端 ACK 未匹配任务：#%d 任务 %s 状态 %s", c->id, tid, status);
             }
-            if (t) save_state_locked();
+            if (changed) save_state_locked();
         }
         pthread_mutex_unlock(&lock);
-        broadcast_state();
+        if (changed) broadcast_state();
     }
     pthread_mutex_lock(&lock);
     if (c->fd == fd) {
@@ -1355,7 +1632,7 @@ static void handle_client_ws(int fd, const char *addr) {
 }
 
 /* ── 连接处理线程 ──────────────────────────────────────── */
-static void *connection_thread(void *arg) {
+static void *connection_thread_inner(void *arg) {
     int fd = *(int *)arg;
     free(arg);
     char header[8192] = {0}, addr[128] = "unknown", real_ip[128] = "unknown";
@@ -1366,7 +1643,14 @@ static void *connection_thread(void *arg) {
         inet_ntop(ss.ss_family, ap, addr, sizeof(addr));
     }
 
-    int n = recv(fd, header, sizeof(header) - 1, 0);
+    int n = 0;
+    while (n < (int)sizeof(header) - 1) {
+        ssize_t got = recv(fd, header + n, sizeof(header) - 1 - (size_t)n, 0);
+        if (got <= 0) break;
+        n += (int)got;
+        header[n] = 0;
+        if (strstr(header, "\r\n\r\n")) break;
+    }
     if (n <= 0) { close(fd); return NULL; }
     header[n] = 0;
     real_ip_from_header(header, addr, real_ip, sizeof(real_ip));
@@ -1400,29 +1684,41 @@ static void *connection_thread(void *arg) {
         char body[4096] = {0};
         read_request_body(fd, header, n, body, sizeof(body));
 
-        char key[80], tid[32], status[32], detail[1024];
+        char key[80], tid[32], status[32], detail[1024], secret[64];
         json_value(body, "clientId", key, sizeof(key));
         json_value(body, "taskId", tid, sizeof(tid));
         json_value(body, "status", status, sizeof(status));
         json_value(body, "detail", detail, sizeof(detail));
+        json_value(body, "secret", secret, sizeof(secret));
 
         int accepted = 0;
+        int changed = 0;
         pthread_mutex_lock(&lock);
         Client *c = find_client_key(key);
+        if (!c || secret[0] == 0 || strcmp(c->secret, secret) != 0) {
+            pthread_mutex_unlock(&lock);
+            const char *err = "{\"ok\":false,\"error\":\"ACK 密钥无效\"}";
+            send_http(fd, 403, "Forbidden", "application/json; charset=utf-8", err, strlen(err), NULL);
+            close(fd);
+            return NULL;
+        }
         Task *t = find_task(c, tid);
         if (should_apply_ack_status(t, status)) {
             int was_terminal = is_terminal_status(t->status);
-            set_task_status_detail(t, status, detail);
+            int real_change = strcmp(t->status, status) != 0
+                    || (detail[0] && strcmp(t->detail, detail) != 0);
+            if (real_change) set_task_status_detail(t, status, detail);
             if (!was_terminal && is_terminal_status(status)) send_next_task(c);
             accepted = 1;
+            changed = real_change;
         } else if (t) {
             accepted = 1;
         } else if (is_terminal_status(status)) {
             add_event_locked("客户端 HTTP ACK 未匹配：客户端 %s 任务 %s 状态 %s", key, tid, status);
         }
-        if (t) save_state_locked();
+        if (changed) save_state_locked();
         pthread_mutex_unlock(&lock);
-        broadcast_state();
+        if (changed) broadcast_state();
 
         char resp[96];
         int rn = snprintf(resp, sizeof(resp), "{\"ok\":true,\"accepted\":%s}", accepted ? "true" : "false");
@@ -1497,7 +1793,12 @@ static void *connection_thread(void *arg) {
         }
         if (websocket_handshake(fd, header)) {
             clear_socket_read_timeout(fd);
-            handle_admin(fd);
+            /* 管理页发送大状态帧时不能无限期占着全局锁：给管理员连接 5 秒写超时。 */
+            struct timeval admin_tv = {5, 0};
+            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &admin_tv, sizeof(admin_tv));
+            char token[64] = {0};
+            get_cookie(header, "led_session", token, sizeof(token));
+            handle_admin(fd, session_expiry(token));
         }
         close(fd);
         return NULL;
@@ -1515,7 +1816,7 @@ static void *connection_thread(void *arg) {
             int locked = login_locked_seconds(real_ip);
             if (locked > 0) {
                 pthread_mutex_lock(&lock);
-                add_event_locked("管理登录被锁定：访问者 %s 仍需等待 %d 秒，提交密码：%s", real_ip, locked, password);
+                add_event_locked("管理登录被锁定：访问者 %s 仍需等待 %d 秒", real_ip, locked);
                 pthread_mutex_unlock(&lock);
                 serve_login_page(fd, "登录已锁定，请稍候再试");
             } else if (check_password(password)) {
@@ -1528,7 +1829,7 @@ static void *connection_thread(void *arg) {
 
                 char cookie_hdr[512];
                 snprintf(cookie_hdr, sizeof(cookie_hdr),
-                    "Set-Cookie: led_session=%s; Path=/; Max-Age=1800; HttpOnly\r\n"
+                    "Set-Cookie: led_session=%s; Path=/; Max-Age=1800; HttpOnly; SameSite=Strict\r\n"
                     "Location: %s\r\n",
                     token, home_path);
                 send_http(fd, 302, "Found", "text/plain", NULL, 0, cookie_hdr);
@@ -1536,9 +1837,9 @@ static void *connection_thread(void *arg) {
                 int locked_for = record_login_failure(real_ip);
                 pthread_mutex_lock(&lock);
                 if (locked_for > 0) {
-                    add_event_locked("管理登录失败并锁定：访问者 %s 连续输错 3 次，锁定 1800 秒，错误密码：%s", real_ip, password);
+                    add_event_locked("管理登录失败并锁定：访问者 %s 连续输错 3 次，锁定 1800 秒", real_ip);
                 } else {
-                    add_event_locked("管理登录失败：访问者 %s 错误密码：%s", real_ip, password);
+                    add_event_locked("管理登录失败：访问者 %s 密码错误", real_ip);
                 }
                 pthread_mutex_unlock(&lock);
                 char msg[256];
@@ -1569,6 +1870,18 @@ static void *connection_thread(void *arg) {
     return NULL;
 }
 
+static void connection_done(void) {
+    pthread_mutex_lock(&lock);
+    if (active_connections > 0) active_connections--;
+    pthread_mutex_unlock(&lock);
+}
+
+static void *connection_thread(void *arg) {
+    void *result = connection_thread_inner(arg);
+    connection_done();
+    return result;
+}
+
 /* ── 监听套接字 ────────────────────────────────────────── */
 static int listen_socket(const char *addr, const char *port, int family) {
     struct addrinfo hints, *res = NULL, *rp;
@@ -1581,9 +1894,8 @@ static int listen_socket(const char *addr, const char *port, int family) {
         if (fd < 0) continue;
         int one = 1;
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-#ifdef SO_REUSEPORT
-        setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));
-#endif
+        /* 不设置 SO_REUSEPORT：否则服务脚本和手工启动能同时 bind 同一端口，
+           两个进程各自加载并覆盖 state.db，任务编号和在线状态会互相踩。 */
         if (family == AF_INET6) setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &one, sizeof(one));
         if (bind(fd, rp->ai_addr, rp->ai_addrlen) == 0 && listen(fd, 128) == 0) break;
         close(fd); fd = -1;
@@ -1639,6 +1951,12 @@ int main(int argc, char **argv) {
             }
             reset_pw = 1;
             new_password = argv[++i];
+            if (!new_password[0]) {
+                fprintf(stderr, "新密码不能为空。\n");
+                return 2;
+            }
+        } else if (strcmp(argv[i], "--trust-proxy") == 0) {
+            trust_proxy = 1;
         } else if (strcmp(argv[i], "--home-path") == 0) {
             if (i + 1 >= argc) {
                 fprintf(stderr, "参数 --home-path 缺少主页路径。\n");
@@ -1683,13 +2001,24 @@ int main(int argc, char **argv) {
     }
 
     int fds[2], count = 0;
-    fds[count] = listen_socket(addr, port, AF_INET);
-    if (fds[count] >= 0) { log_line("正在监听 IPv4 %s:%s", addr, port); count++; }
-    else log_line("IPv4 监听失败：%s", strerror(errno));
-
-    fds[count] = listen_socket("::", port, AF_INET6);
-    if (fds[count] >= 0) { log_line("正在监听 IPv6 [::]:%s", port); count++; }
-    else log_line("IPv6 监听失败：%s", strerror(errno));
+    /* -a 必须真正约束监听范围：旧实现无论 -a 是什么都会额外监听 IPv6 [::]，
+       导致 `-a 127.0.0.1` 仍然能被局域网 IPv6 访问。这里按地址字面量选择地址族：
+       IPv6 地址只建 IPv6 socket；具体 IPv4 地址只建 IPv4 socket；只有 0.0.0.0
+       才同时监听 [::]，保持“默认双栈”的旧行为。 */
+    if (strchr(addr, ':') != NULL) {
+        fds[count] = listen_socket(addr, port, AF_INET6);
+        if (fds[count] >= 0) { log_line("正在监听 IPv6 %s:%s", addr, port); count++; }
+        else log_line("IPv6 监听失败：%s", strerror(errno));
+    } else {
+        fds[count] = listen_socket(addr, port, AF_INET);
+        if (fds[count] >= 0) { log_line("正在监听 IPv4 %s:%s", addr, port); count++; }
+        else log_line("IPv4 监听失败：%s", strerror(errno));
+        if (strcmp(addr, "0.0.0.0") == 0) {
+            fds[count] = listen_socket("::", port, AF_INET6);
+            if (fds[count] >= 0) { log_line("正在监听 IPv6 [::]:%s", port); count++; }
+            else log_line("IPv6 监听失败：%s", strerror(errno));
+        }
+    }
 
     if (count == 0) { log_line("没有可用的监听套接字"); return 1; }
 
@@ -1705,14 +2034,29 @@ int main(int argc, char **argv) {
         for (int i = 0; i < count; i++) if (FD_ISSET(fds[i], &set)) {
             int cfd = accept(fds[i], NULL, NULL);
             if (cfd < 0) continue;
+            pthread_mutex_lock(&lock);
+            if (active_connections >= MAX_CONNECTIONS) {
+                pthread_mutex_unlock(&lock);
+                close(cfd);
+                continue;
+            }
+            active_connections++;
+            pthread_mutex_unlock(&lock);
             set_socket_timeouts(cfd);
             int *arg = malloc(sizeof(int));
-            if (!arg) { close(cfd); continue; }
+            if (!arg) { close(cfd); connection_done(); continue; }
             *arg = cfd;
             pthread_t tid;
-            if (pthread_create(&tid, NULL, connection_thread, arg) != 0) {
+            pthread_attr_t attr;
+            pthread_attr_init(&attr);
+            /* 默认 8MB 栈 × 几百连接会耗尽 32 位地址空间；固定线程栈即可。 */
+            pthread_attr_setstacksize(&attr, 512 * 1024);
+            int created = pthread_create(&tid, &attr, connection_thread, arg);
+            pthread_attr_destroy(&attr);
+            if (created != 0) {
                 close(cfd);
                 free(arg);
+                connection_done();
                 continue;
             }
             pthread_detach(tid);

@@ -5,7 +5,7 @@
 set -e
 
 PACKAGE="com.lmq8267.ledclient"
-ACCESSIBILITY_SERVICE="${PACKAGE}/.LedAccessibilityService"
+NOTIF_SERVICE="${PACKAGE}/.LedNotifProbe"
 
 echo "╔══════════════════════════════════════════╗"
 echo "║     LED悬浮屏 - ADB 权限一键设置          ║"
@@ -27,10 +27,22 @@ if [ -z "$ADB_IP" ]; then
     echo "[!] IP 地址不能为空"
     exit 1
 fi
+case "$ADB_IP" in
+    *[!0-9A-Za-z.:_-]*)
+        echo "[!] IP 地址包含非法字符"
+        exit 1
+        ;;
+esac
 
 # ── 输入端口（默认 5555）──
 read -p "请输入端口号 (默认 5555，直接回车): " ADB_PORT_INPUT
 ADB_PORT="${ADB_PORT_INPUT:-5555}"
+case "$ADB_PORT" in
+    *[!0-9]*|"")
+        echo "[!] 端口必须是数字"
+        exit 1
+        ;;
+esac
 
 echo ""
 echo "============================================"
@@ -59,37 +71,12 @@ fi
 echo "    [OK] 已授权"
 echo ""
 
-# ── 已开启则直接退出 ──
-echo "检查无障碍服务是否已开启..."
-CURRENT_SERVICES="$(adb -s "${ADB_IP}:${ADB_PORT}" shell settings get secure enabled_accessibility_services 2>/dev/null | tr -d '\r')"
-ACCESSIBILITY_STATUS="$(adb -s "${ADB_IP}:${ADB_PORT}" shell dumpsys accessibility 2>/dev/null || true)"
-SERVICE_CRASHED=0
-if echo "${ACCESSIBILITY_STATUS}" | grep -F "Crashed services:" | grep -Fq "${PACKAGE}"; then
-    SERVICE_CRASHED=1
-fi
-if echo "${CURRENT_SERVICES}" | grep -Fq "${ACCESSIBILITY_SERVICE}"; then
-    if [ "${SERVICE_CRASHED}" = "1" ]; then
-        echo "    已开启，但系统标记该无障碍服务已崩溃，将刷新本应用绑定"
-        echo ""
-    else
-    echo ""
-    echo "╔══════════════════════════════════════════╗"
-    echo "║   [OK] 无障碍服务已经开启，无需重复开启   ║"
-    echo "╚══════════════════════════════════════════╝"
-    exit 0
-    fi
-else
-    echo "    未开启，将继续授权"
-    echo ""
-fi
-
 # ── 确认 ──
 echo "╔══════════════════════════════════════════╗"
 echo "║  即将执行以下操作：                       ║"
 echo "║  1. SYSTEM_ALERT_WINDOW  → 允许悬浮窗    ║"
-echo "║  2. RUN_IN_BACKGROUND    → 允许后台运行  ║"
-echo "║  3. RUN_ANY_IN_BACKGROUND→ 允许任意后台  ║"
-echo "║  4. 无障碍服务            → 开启后台驻留  ║"
+echo "║  2. RUN_ANY_IN_BACKGROUND→ 允许后台运行  ║"
+echo "║  3. 通知使用权            → 强停后复活    ║"
 echo "╚══════════════════════════════════════════╝"
 echo ""
 read -p "是否继续？(Y/n): " CONFIRM
@@ -107,54 +94,38 @@ echo ""
 
 echo "[4/6] 设置后台运行权限..."
 adb -s "${ADB_IP}:${ADB_PORT}" shell appops set "${PACKAGE}" RUN_IN_BACKGROUND allow
-echo "    [OK] RUN_IN_BACKGROUND = allow"
-echo ""
-
-echo "[5/6] 设置任意后台运行权限..."
 adb -s "${ADB_IP}:${ADB_PORT}" shell appops set "${PACKAGE}" RUN_ANY_IN_BACKGROUND allow
-echo "    [OK] RUN_ANY_IN_BACKGROUND = allow"
+echo "    [OK] RUN_IN_BACKGROUND / RUN_ANY_IN_BACKGROUND = allow"
 echo ""
 
-echo "[6/6] 开启无障碍服务（后台保活）..."
-OLD_SERVICES="$(adb -s "${ADB_IP}:${ADB_PORT}" shell settings get secure enabled_accessibility_services 2>/dev/null | tr -d '\r')"
-if [ "${SERVICE_CRASHED}" = "1" ]; then
-    REMOVE_SERVICES=""
-    OLD_IFS="${IFS}"
-    IFS=":"
-    for service in ${OLD_SERVICES}; do
-        if [ "${service}" = "${ACCESSIBILITY_SERVICE}" ] || [ -z "${service}" ] || [ "${service}" = "null" ]; then
-            continue
-        fi
-        if [ -z "${REMOVE_SERVICES}" ]; then
-            REMOVE_SERVICES="${service}"
-        else
-            REMOVE_SERVICES="${REMOVE_SERVICES}:${service}"
-        fi
-    done
-    IFS="${OLD_IFS}"
-    adb -s "${ADB_IP}:${ADB_PORT}" shell settings put secure enabled_accessibility_services "${REMOVE_SERVICES}"
-    sleep 1
-    OLD_SERVICES="${REMOVE_SERVICES}"
-fi
-if [ "${OLD_SERVICES}" = "null" ] || [ -z "${OLD_SERVICES}" ]; then
-    NEW_SERVICES="${ACCESSIBILITY_SERVICE}"
-elif echo "${OLD_SERVICES}" | grep -Fq "${ACCESSIBILITY_SERVICE}"; then
-    NEW_SERVICES="${OLD_SERVICES}"
+echo "[5/6] 授予通知使用权（强停后的复活锚点）..."
+# 这是本机唯一可靠的复活路径：系统会重新绑定已授权的通知监听，
+# 顺带把进程拉回来。必须先授权，否则按电源键/强停后客户端不会自动恢复。
+if adb -s "${ADB_IP}:${ADB_PORT}" shell cmd notification allow_listener "${NOTIF_SERVICE}" 2>/dev/null; then
+    echo "    [OK] 通知监听 = ${NOTIF_SERVICE}"
 else
-    NEW_SERVICES="${OLD_SERVICES}:${ACCESSIBILITY_SERVICE}"
+    # 老固件没有 cmd notification 子命令时，退回直接写 Secure 设置。
+    OLD_LISTENERS="$(adb -s "${ADB_IP}:${ADB_PORT}" shell settings get secure enabled_notification_listeners 2>/dev/null | tr -d '\r')"
+    if [ "${OLD_LISTENERS}" = "null" ] || [ -z "${OLD_LISTENERS}" ]; then
+        NEW_LISTENERS="${NOTIF_SERVICE}"
+    elif echo "${OLD_LISTENERS}" | grep -Fq "${NOTIF_SERVICE}"; then
+        NEW_LISTENERS="${OLD_LISTENERS}"
+    else
+        NEW_LISTENERS="${OLD_LISTENERS}:${NOTIF_SERVICE}"
+    fi
+    adb -s "${ADB_IP}:${ADB_PORT}" shell settings put secure enabled_notification_listeners "${NEW_LISTENERS}"
+    echo "    [OK] 通知监听 = ${NOTIF_SERVICE}（secure settings 兜底）"
 fi
-adb -s "${ADB_IP}:${ADB_PORT}" shell settings put secure enabled_accessibility_services "${NEW_SERVICES}"
-adb -s "${ADB_IP}:${ADB_PORT}" shell settings put secure accessibility_enabled 1
-echo "    [OK] 无障碍服务已开启"
 echo ""
 
 # ── 验证 ──
-echo "  验证权限..."
+echo "[6/6] 验证权限..."
 adb -s "${ADB_IP}:${ADB_PORT}" shell appops get "${PACKAGE}" 2>/dev/null | grep -E "SYSTEM_ALERT_WINDOW|RUN_IN_BACKGROUND|RUN_ANY_IN_BACKGROUND"
-adb -s "${ADB_IP}:${ADB_PORT}" shell settings get secure enabled_accessibility_services 2>/dev/null | grep -F "${PACKAGE}"
+adb -s "${ADB_IP}:${ADB_PORT}" shell settings get secure enabled_notification_listeners 2>/dev/null | grep -F "${PACKAGE}"
 echo ""
 
 echo "╔══════════════════════════════════════════╗"
-echo "║   ✅ 全部设置完成！                      ║"
-echo "║   请在电视上打开 LED悬浮屏 应用          ║"
+echo "║   全部设置完成！                         ║"
+echo "║   请在电视上打开 LED悬浮屏 应用并点启动  ║"
+echo "║   之后按电源键/切后台验证是否自动恢复    ║"
 echo "╚══════════════════════════════════════════╝"

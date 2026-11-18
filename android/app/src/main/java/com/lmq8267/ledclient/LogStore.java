@@ -3,15 +3,17 @@ package com.lmq8267.ledclient;
 import android.content.Context;
 import android.text.format.DateFormat;
 
-import java.io.BufferedReader;
 import java.io.File;
-import java.io.FileReader;
+import java.io.FileOutputStream;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.io.RandomAccessFile;
 import java.util.Date;
 
 final class LogStore {
     private static final long LIMIT = 20L * 1024L * 1024L;
+    /** 日志页每秒刷新；只读尾部，避免把 20MB 文件整份读进主线程。 */
+    private static final int READ_TAIL = 64 * 1024;
 
     private LogStore() {}
 
@@ -34,16 +36,24 @@ final class LogStore {
     static synchronized String read(Context context) {
         File file = file(context);
         if (!file.exists()) return "";
-        StringBuilder out = new StringBuilder();
         try {
-            BufferedReader reader = new BufferedReader(new FileReader(file));
-            char[] buffer = new char[4096];
-            int n;
-            while ((n = reader.read(buffer)) != -1) out.append(buffer, 0, n);
-            reader.close();
+            long length = file.length();
+            long start = Math.max(0L, length - READ_TAIL);
+            RandomAccessFile raf = new RandomAccessFile(file, "r");
+            byte[] data = new byte[(int) (length - start)];
+            raf.seek(start);
+            raf.readFully(data);
+            raf.close();
+            int offset = 0;
+            if (start > 0) {
+                // 从文件中间开始时第一行通常是半截，丢掉它。
+                while (offset < data.length && data[offset] != '\n') offset++;
+                if (offset < data.length) offset++;
+            }
+            return new String(data, offset, data.length - offset, "UTF-8");
         } catch (IOException ignored) {
+            return "";
         }
-        return out.toString();
     }
 
     static synchronized void clear(Context context) {
@@ -53,17 +63,23 @@ final class LogStore {
 
     private static void trimIfNeeded(File file) throws IOException {
         if (!file.exists() || file.length() < LIMIT) return;
-        BufferedReader reader = new BufferedReader(new FileReader(file));
-        StringBuilder tail = new StringBuilder();
-        String line;
         long keep = LIMIT / 2;
-        while ((line = reader.readLine()) != null) {
-            tail.append(line).append('\n');
-            if (tail.length() > keep) tail.delete(0, tail.length() - (int) keep);
+        long length = file.length();
+        long start = Math.max(0L, length - keep);
+        RandomAccessFile raf = new RandomAccessFile(file, "r");
+        byte[] data = new byte[(int) (length - start)];
+        raf.seek(start);
+        raf.readFully(data);
+        raf.close();
+        int offset = 0;
+        if (start > 0) {
+            while (offset < data.length && data[offset] != '\n') offset++;
+            if (offset < data.length) offset++;
         }
-        reader.close();
-        FileWriter writer = new FileWriter(file, false);
-        writer.write(tail.toString());
-        writer.close();
+        // 旧实现逐行 append 后反复 delete(0, ...)，20MB 时是 O(n²) 的 memmove，
+        // 会把调用线程（通常是主线程）卡到 ANR。这里按字节保留尾部，线性完成。
+        FileOutputStream out = new FileOutputStream(file, false);
+        out.write(data, offset, data.length - offset);
+        out.close();
     }
 }

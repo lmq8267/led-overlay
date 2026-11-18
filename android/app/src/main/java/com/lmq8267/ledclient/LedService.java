@@ -5,14 +5,18 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.Context;
 import android.content.Intent;
-import android.content.pm.PackageManager;
+import android.content.pm.ServiceInfo;
 import android.graphics.PixelFormat;
+import android.net.ConnectivityManager;
+import android.net.Network;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.provider.Settings;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.WindowManager;
 
@@ -23,21 +27,58 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 
 public class LedService extends Service {
+    private static final String TAG = "LedOverlay";
+    private static final long HEARTBEAT_INTERVAL_MS = 5_000L;
     private WsClient ws;
     private Thread thread;
     private String currentServer = "";
+    /** 服务端在 hello-ok 里下发的 ACK 密钥；HTTP 兜底 ACK 必须带上。 */
+    private volatile String ackSecret = "";
+    /** onDestroy 之后网络回调仍可能并发进入 startClient；这个标记保证不会创建停不掉的连接。 */
+    private volatile boolean destroyed;
     private volatile int connectionGeneration = 0;
     private WindowManager windowManager;
-    private OverlayView overlay;
+    private volatile OverlayView overlay;
     private Handler mainHandler;
     private String lastOverlayError = "";
+    private ConnectivityManager.NetworkCallback networkCallback;
     private final ArrayList<LedMessage> displayQueue = new ArrayList<LedMessage>();
     private final ArrayList<String> completedAckRetries = new ArrayList<String>();
+    private final ArrayList<String> ackInFlight = new ArrayList<String>();
+    /**
+     * ACK 用固定两个线程：一个跑 WebSocket 发送，一个跑 HTTP 兜底。
+     * 旧实现每条 ACK 每次重试都 new Thread，HTTP 不通时会瞬间堆出几百个线程。
+     */
+    private final ExecutorService ackExecutor = Executors.newFixedThreadPool(2, new ThreadFactory() {
+        @Override public Thread newThread(Runnable r) {
+            Thread t = new Thread(r, "led-ack");
+            t.setDaemon(true);
+            return t;
+        }
+    });
+    /** 消息历史是本地小文件读写，不能放在主线程或 ACK 线程上。 */
+    private final ExecutorService ioExecutor = Executors.newSingleThreadExecutor(new ThreadFactory() {
+        @Override public Thread newThread(Runnable r) {
+            Thread t = new Thread(r, "led-io");
+            t.setDaemon(true);
+            return t;
+        }
+    });
     private String displayingTaskId = "";
     private String lastHttpAckError = "";
+    private final Runnable heartbeat = new Runnable() {
+        @Override public void run() {
+            Prefs.touchHeartbeat(LedService.this);
+            if (mainHandler != null) mainHandler.postDelayed(this, HEARTBEAT_INTERVAL_MS);
+        }
+    };
     private final Runnable pendingAckFlusher = new Runnable() {
         @Override public void run() {
             flushPendingCompletedAcks();
@@ -51,45 +92,100 @@ public class LedService extends Service {
     public void onCreate() {
         super.onCreate();
         mainHandler = new Handler(Looper.getMainLooper());
-        Prefs.store(this).edit().putBoolean(Prefs.KEY_RUNNING, true).apply();
-        try {
-            startForeground(7, notification());
-        } catch (Exception ignored) {
-            // 小米电视 AppsRelaunchController 会拦截 setServiceForeground
-            // 忽略异常，作为一个普通后台服务运行
-        }
+        // 必须无条件先 startForeground：Android 8+ 的 5 秒规则不会因为厂商拦截而放宽。
+        // 前台服务类型改成 specialUse 后，MiTV 上不再走 dataSync 那套限制（quizgate 已实测）。
+        startAsForeground();
+        Prefs.setRunning(this, true);
+        // 只有服务真的起来了才清“待恢复”标记；startForegroundService 被系统拒绝时保留，等下次锚点重试。
+        Prefs.setPendingRestore(this, false);
+        Prefs.touchHeartbeat(this);
+        mainHandler.post(heartbeat);
+        registerNetworkCallback();
         mainHandler.postDelayed(pendingAckFlusher, 5000);
+        Log.i(TAG, "服务创建 enabled=" + Prefs.enabled(this));
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (intent != null && Prefs.ACTION_STOP.equals(intent.getAction())) {
+        String action = intent == null ? "" : intent.getAction();
+        // 走到这里说明服务已经在运行（可能是复用实例），待恢复标记可以清掉。
+        Prefs.setPendingRestore(this, false);
+        if (Prefs.ACTION_CLEAN_IDLE_OVERLAY.equals(action)) {
+            if (!Prefs.enabled(this)) {
+                stopSelf();
+                return START_NOT_STICKY;
+            }
+            removeIdleOverlay();
+            // 该 action 用的是 startForegroundService：如果服务实例刚好被系统回收，
+            // 系统会新建一个只有心跳、没有 WebSocket 的空壳。这里补一次连接，
+            // 确保 CLEAN 不会把“运行中但没连接”的状态留在界面上。
+            startClient();
+            return START_STICKY;
+        }
+
+        if (Prefs.ACTION_START.equals(action)) {
+            Prefs.setEnabled(this, true);
+        } else if (!Prefs.enabled(this)) {
+            // 系统用 null intent 重启、或者旧版本遗留的 RESTORE，都不能绕过用户按下的“停止”。
+            Log.i(TAG, "服务停止 reason=disabled action=" + action);
             stopSelf();
             return START_NOT_STICKY;
         }
-        if (intent != null && Prefs.ACTION_CLEAN_IDLE_OVERLAY.equals(intent.getAction())) {
-            removeIdleOverlay();
-            return START_STICKY;
-        }
+
+        Prefs.touchHeartbeat(this);
         startClient();
         return START_STICKY;
     }
 
     @Override
     public void onDestroy() {
-        if (mainHandler != null) mainHandler.removeCallbacks(pendingAckFlusher);
+        destroyed = true;
+        if (mainHandler != null) {
+            mainHandler.removeCallbacks(heartbeat);
+            mainHandler.removeCallbacks(pendingAckFlusher);
+        }
+        ackExecutor.shutdownNow();
+        ioExecutor.shutdownNow();
+        unregisterNetworkCallback();
         connectionGeneration++;
         if (ws != null) ws.stop();
         if (overlay != null) {
+            // 先停掉 16ms 刷新和 onFinished 回调，再移除窗口：
+            // 否则服务销毁后 OverlayView 仍会在主线程自循环。
+            overlay.stop();
             try { windowManager.removeView(overlay); } catch (Exception ignored) {}
         }
-        if (!getPackageManager().hasSystemFeature(PackageManager.FEATURE_LEANBACK)) {
-            Prefs.store(this).edit()
-                    .putBoolean(Prefs.KEY_RUNNING, false)
-                    .putString(Prefs.KEY_CONNECTION_STATE, Prefs.CONNECTION_DISCONNECTED)
-                    .apply();
-        }
+        // 这里只清运行态。enabled 是用户意图，系统杀进程时 onDestroy 往往根本不会执行，
+        // 即使执行了也不能把用户“开着”的意图抹掉，否则通知监听锚点将无事可做。
+        Prefs.setRunning(this, false);
+        Prefs.setConnectionState(this,
+                Prefs.enabled(this) ? Prefs.CONNECTION_CONNECTING : Prefs.CONNECTION_DISCONNECTED);
+        Log.i(TAG, "服务销毁 enabled=" + Prefs.enabled(this));
         super.onDestroy();
+    }
+
+    /** 所有复活入口统一走这里，避免每个调用点各写一遍 startForegroundService 的兼容分支。 */
+    static void start(Context context, String action) {
+        Intent intent = new Intent(context, LedService.class).setAction(action);
+        try {
+            if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent);
+            else context.startService(intent);
+        } catch (Throwable first) {
+            // Android 12+ 的后台启动限制可能抛 ForegroundServiceStartNotAllowedException。
+            // 在部分电视固件上普通 startService 仍可用，作为最后兜底；失败时只记录，不让锚点崩掉。
+            try {
+                context.startService(intent);
+            } catch (Throwable second) {
+                Log.w(TAG, "服务启动失败 action=" + action, first);
+            }
+        }
+    }
+
+    static void stop(Context context) {
+        Prefs.setEnabled(context, false);
+        Prefs.setPendingRestore(context, false);
+        Prefs.clearRuntimeState(context);
+        try { context.stopService(new Intent(context, LedService.class)); } catch (Throwable ignored) {}
     }
 
     @Override
@@ -97,15 +193,15 @@ public class LedService extends Service {
         return null;
     }
 
-    private void startClient() {
+    private synchronized void startClient() {
+        if (destroyed || !Prefs.enabled(this)) return;
         final String server = Prefs.server(this);
         if (server.trim().length() == 0) return;
-        if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(this)
-                && !getPackageManager().hasSystemFeature(PackageManager.FEATURE_LEANBACK)) {
+        if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(this)) {
+            // 悬浮窗缺失不应该把整个连接停掉：进程和 WebSocket 仍要活着，
+            // 任务到达时会走 ensureOverlay 失败并把 failed ACK 回报给服务端。
             LogStore.append(this, getString(R.string.log_overlay_permission_missing));
-            Prefs.store(this).edit().putBoolean(Prefs.KEY_RUNNING, false).apply();
-            stopSelf();
-            return;
+            Log.w(TAG, "缺少悬浮窗权限，继续保持连接");
         }
         final String target = WsClient.normalize(server);
         if (thread != null && thread.isAlive()) {
@@ -125,6 +221,7 @@ public class LedService extends Service {
         final WsClient client = new WsClient(server, new WsClient.Listener() {
             @Override public void onOpen() {
                 if (!isActiveConnection(generation)) return;
+                ackSecret = "";
                 Prefs.setConnectionState(LedService.this, Prefs.CONNECTION_CONNECTED);
                 LogStore.append(LedService.this, getString(R.string.log_connected, target));
                 JSONObject hello = new JSONObject();
@@ -134,16 +231,22 @@ public class LedService extends Service {
                     hello.put("name", Build.MANUFACTURER + " " + Build.MODEL);
                 } catch (Exception ignored) {}
                 clientRef[0].send(hello);
-                flushPendingCompletedAcks();
             }
 
             @Override public void onText(String text) {
                 if (!isActiveConnection(generation)) return;
                 Prefs.setConnectionState(LedService.this, Prefs.CONNECTION_CONNECTED);
-                LogStore.append(LedService.this, getString(R.string.log_message, text));
                 try {
                     JSONObject json = new JSONObject(text);
                     String type = json.optString("type");
+                    if ("hello-ok".equals(type)) {
+                        ackSecret = json.optString("secret", "");
+                        // 不能把整帧写进日志：里面有本次连接的 ACK 密钥。
+                        LogStore.append(LedService.this, "连接握手完成，已更新 ACK 密钥");
+                        flushPendingCompletedAcks();
+                        return;
+                    }
+                    LogStore.append(LedService.this, getString(R.string.log_message, text));
                     if ("message".equals(type)) {
                         String taskId = json.optString("taskId", "");
                         try {
@@ -162,6 +265,7 @@ public class LedService extends Service {
 
             @Override public void onClosed(Exception error) {
                 if (!isActiveConnection(generation)) return;
+                ackSecret = "";
                 Prefs.setConnectionState(LedService.this,
                         Prefs.running(LedService.this) ? Prefs.CONNECTION_CONNECTING : Prefs.CONNECTION_DISCONNECTED);
                 String reason = error == null || error.getMessage() == null
@@ -185,6 +289,9 @@ public class LedService extends Service {
     }
 
     private boolean ensureOverlay() {
+        // 队列可能在被取消的瞬间变空；主线程真正加窗前再确认一次，
+        // 避免留下一个没有任务的空闲系统窗口（MiTV 会因此强停进程）。
+        if (!hasPendingDisplay()) return false;
         if (Looper.myLooper() != Looper.getMainLooper()) {
             final boolean[] ok = new boolean[] {false};
             final CountDownLatch latch = new CountDownLatch(1);
@@ -233,6 +340,12 @@ public class LedService extends Service {
         }
     }
 
+    private boolean hasPendingDisplay() {
+        synchronized (displayQueue) {
+            return displayingTaskId.length() > 0 || !displayQueue.isEmpty();
+        }
+    }
+
     private void receiveMessage(final LedMessage message) {
         if (Prefs.isTaskDone(this, message.taskId)) {
             if (Prefs.hasPendingCompletedAck(this, message.taskId)) return;
@@ -261,8 +374,20 @@ public class LedService extends Service {
     }
 
     private void processDisplayQueue() {
+        boolean idle;
         synchronized (displayQueue) {
-            if (displayingTaskId.length() > 0 || displayQueue.isEmpty()) return;
+            // 正在显示的任务没结束前绝对不能再出队：OverlayView.show() 会替换当前
+            // message 并移除旧的 tick，被顶掉的任务永远拿不到 onFinished，也就不会
+            // 上报 completed。队列只在 onFinished/cancel/failed 清空 displayingTaskId 后推进。
+            if (displayingTaskId.length() > 0) return;
+            idle = displayQueue.isEmpty();
+        }
+        if (idle) {
+            // 队列空了必须把窗口真正 removeView，不能只 setVisibility(INVISIBLE)：
+            // MiTV 的 MitvWindowManager 只要发现应用还有系统窗口，就会在切后台时强停
+            // （2026-11-18 对照原实现确认，隐藏窗口同样会触发）。
+            removeIdleOverlay();
+            return;
         }
         if (!ensureOverlay()) {
             String reason = lastOverlayError.length() == 0
@@ -290,10 +415,12 @@ public class LedService extends Service {
         for (int i = 0; i < failed.size(); i++) {
             sendAckReliable(failed.get(i).taskId, "failed", reason);
         }
+        removeIdleOverlay();
     }
 
     private void showWhenOverlayReady(final LedMessage message, final int attempts) {
-        if (overlay == null) {
+        final OverlayView view = overlay;
+        if (view == null) {
             sendAckReliable(message.taskId, "failed", "悬浮窗对象不存在，无法显示");
             synchronized (displayQueue) {
                 if (displayingTaskId.equals(message.taskId)) displayingTaskId = "";
@@ -301,9 +428,9 @@ public class LedService extends Service {
             processDisplayQueue();
             return;
         }
-        overlay.post(new Runnable() {
+        view.post(new Runnable() {
             @Override public void run() {
-                if (overlay.getWidth() <= 0 || overlay.getHeight() <= 0) {
+                if (view.getWidth() <= 0 || view.getHeight() <= 0) {
                     if (attempts < 10) {
                         showWhenOverlayReady(message, attempts + 1);
                     } else {
@@ -316,10 +443,14 @@ public class LedService extends Service {
                     }
                     return;
                 }
-                Prefs.markTaskSeen(LedService.this, message.taskId);
-                MessageHistory.append(LedService.this, message);
+                final LedMessage historyMessage = message;
+                submitIo(new Runnable() {
+                    @Override public void run() {
+                        MessageHistory.append(LedService.this, historyMessage);
+                    }
+                });
                 sendAckReliable(message.taskId, "displaying", "客户端正在按本地队列显示该任务");
-                overlay.show(message, new OverlayView.Listener() {
+                view.show(message, new OverlayView.Listener() {
                     @Override public void onFinished(String taskId) {
                         Prefs.markTaskDone(LedService.this, taskId);
                         LogStore.append(LedService.this, "任务显示完成，正在上报服务端：" + taskId);
@@ -351,17 +482,44 @@ public class LedService extends Service {
     }
 
     private void sendAckReliable(String taskId, String status, String detail) {
+        if (taskId == null || taskId.length() == 0) return;
         if ("completed".equals(status)) {
             Prefs.addPendingCompletedAck(this, taskId);
-            sendAck(taskId, status, detail);
+            submitAckSend(taskId, status, detail);
             sendCompletedAckHttp(taskId, detail);
             scheduleCompletedAckRetry(taskId, detail);
             return;
         }
         Prefs.addPendingAck(this, taskId, status);
-        sendAck(taskId, status, detail);
+        submitAckSend(taskId, status, detail);
         sendAckHttpAsync(taskId, status, detail);
         scheduleAckRetry(taskId, status, detail);
+    }
+
+    /** WS ACK 也放到 ACK 线程池：主线程（onFinished / 定时补发）不能因为 socket 写阻塞而 ANR。 */
+    private void submitAckSend(final String taskId, final String status, final String detail) {
+        final String key = "ws:" + status + ":" + taskId;
+        synchronized (ackInFlight) {
+            if (ackInFlight.contains(key)) return;
+            ackInFlight.add(key);
+        }
+        try {
+            ackExecutor.execute(new Runnable() {
+                @Override public void run() {
+                    try {
+                        sendAck(taskId, status, detail);
+                    } finally {
+                        synchronized (ackInFlight) {
+                            ackInFlight.remove(key);
+                        }
+                    }
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            synchronized (ackInFlight) {
+                ackInFlight.remove(key);
+            }
+        }
     }
 
     private void scheduleCompletedAckRetry(final String taskId, final String detail) {
@@ -424,7 +582,8 @@ public class LedService extends Service {
 
     private void sendAckHttpAsync(final String taskId, final String status, final String detail) {
         if (taskId == null || taskId.length() == 0) return;
-        new Thread(new Runnable() {
+        final String key = "http:" + status + ":" + taskId;
+        submitAckHttp(key, new Runnable() {
             @Override public void run() {
                 boolean ok = sendAckHttp(taskId, status, detail == null ? "" : detail);
                 if (ok) {
@@ -435,12 +594,13 @@ public class LedService extends Service {
                             + (lastHttpAckError.length() == 0 ? "" : "，" + lastHttpAckError));
                 }
             }
-        }, "led-ack-http-" + status).start();
+        });
     }
 
     private void sendCompletedAckHttp(final String taskId, final String detail) {
         if (taskId == null || taskId.length() == 0) return;
-        new Thread(new Runnable() {
+        final String key = "http:completed:" + taskId;
+        submitAckHttp(key, new Runnable() {
             @Override public void run() {
                 boolean ok = sendAckHttp(taskId, "completed", detail == null ? "客户端显示完成，HTTP 兜底确认" : detail);
                 if (ok) {
@@ -453,7 +613,38 @@ public class LedService extends Service {
                             + (lastHttpAckError.length() == 0 ? "" : "，" + lastHttpAckError));
                 }
             }
-        }, "led-ack-http").start();
+        });
+    }
+
+    private void submitIo(final Runnable task) {
+        try {
+            ioExecutor.execute(task);
+        } catch (RejectedExecutionException ignored) {
+        }
+    }
+
+    private void submitAckHttp(final String key, final Runnable task) {
+        synchronized (ackInFlight) {
+            if (ackInFlight.contains(key)) return;
+            ackInFlight.add(key);
+        }
+        try {
+            ackExecutor.execute(new Runnable() {
+                @Override public void run() {
+                    try {
+                        task.run();
+                    } finally {
+                        synchronized (ackInFlight) {
+                            ackInFlight.remove(key);
+                        }
+                    }
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            synchronized (ackInFlight) {
+                ackInFlight.remove(key);
+            }
+        }
     }
 
     private boolean sendAckHttp(String taskId, String status, String detail) {
@@ -466,6 +657,7 @@ public class LedService extends Service {
             ack.put("taskId", taskId);
             ack.put("status", status);
             ack.put("detail", detail == null ? "" : detail);
+            ack.put("secret", ackSecret);
         } catch (Exception ignored) {}
         byte[] body;
         try {
@@ -525,10 +717,11 @@ public class LedService extends Service {
                 if (displayQueue.get(i).taskId.equals(taskId)) displayQueue.remove(i);
             }
         }
-        if (overlay == null) return;
-        overlay.post(new Runnable() {
+        final OverlayView view = overlay;
+        if (view == null) return;
+        view.post(new Runnable() {
             @Override public void run() {
-                overlay.cancel(taskId);
+                view.cancel(taskId);
                 synchronized (displayQueue) {
                     if (displayingTaskId.equals(taskId)) displayingTaskId = "";
                 }
@@ -558,18 +751,75 @@ public class LedService extends Service {
         LogStore.append(this, "已清理空闲悬浮窗");
     }
 
+    private void startAsForeground() {
+        Notification notification = notification();
+        try {
+            if (Build.VERSION.SDK_INT >= 34) {
+                startForeground(7, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+            } else {
+                startForeground(7, notification);
+            }
+        } catch (Throwable first) {
+            // 个别固件仍可能拒绝带类型的调用：退回不带类型的写法再试一次。
+            // 两次都失败时只记录，不让服务在 onCreate 里直接崩成重启循环。
+            try {
+                startForeground(7, notification);
+            } catch (Throwable second) {
+                Log.w(TAG, "前台服务启动失败", second);
+                LogStore.append(this, "前台服务启动失败：" + second.getClass().getSimpleName());
+            }
+        }
+    }
+
+    private void registerNetworkCallback() {
+        if (Build.VERSION.SDK_INT < 24) return;
+        ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+        if (cm == null) return;
+        networkCallback = new ConnectivityManager.NetworkCallback() {
+            @Override public void onAvailable(Network network) {
+                // 网络恢复时不要等下一次 5 秒重连循环；这里只打断旧 socket，交给 connectLoop 立刻重连。
+                if (ws == null) {
+                    startClient();
+                } else if (!ws.isOpen()) {
+                    ws.reconnect();
+                }
+            }
+
+            @Override public void onLost(Network network) {
+                // Wi-Fi/有线切换时旧 socket 往往仍然“看起来打开”，必须主动关掉，
+                // 否则 send() 会一直写进一个已经失效的链路。
+                if (ws != null) ws.reconnect();
+            }
+        };
+        try {
+            cm.registerDefaultNetworkCallback(networkCallback);
+        } catch (Throwable t) {
+            networkCallback = null;
+            Log.w(TAG, "网络回调注册失败", t);
+        }
+    }
+
+    private void unregisterNetworkCallback() {
+        if (networkCallback == null) return;
+        ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+        if (cm != null) {
+            try { cm.unregisterNetworkCallback(networkCallback); } catch (Throwable ignored) {}
+        }
+        networkCallback = null;
+    }
+
     private Notification notification() {
         Intent open = new Intent(this, MainActivity.class);
         PendingIntent pi = PendingIntent.getActivity(this, 0, open,
                 Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE : 0);
         if (Build.VERSION.SDK_INT >= 26) {
-            NotificationChannel channel = new NotificationChannel("led", getString(R.string.app_name),
-                    NotificationManager.IMPORTANCE_MIN);
+            NotificationChannel channel = new NotificationChannel("led_service", getString(R.string.app_name),
+                    NotificationManager.IMPORTANCE_LOW);
             channel.setShowBadge(false);
             channel.setSound(null, null);
             NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
             manager.createNotificationChannel(channel);
-            return new Notification.Builder(this, "led")
+            return new Notification.Builder(this, "led_service")
                     .setContentTitle(getString(R.string.app_name))
                     .setContentText(getString(R.string.client_running))
                     .setSmallIcon(R.drawable.ic_stat_led)

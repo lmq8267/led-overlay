@@ -126,6 +126,7 @@ jobs:
         with:
           name: led-overlay-android
           path: led-overlay-android.apk
+          retention-days: 1
 
   server:
     name: 服务端-${{ matrix.name }}
@@ -203,6 +204,7 @@ jobs:
         with:
           name: led-overlay-server-${{ matrix.name }}
           path: led_server-${{ matrix.name }}
+          retention-days: 1
 
   release:
     name: 发布到 GitHub Release

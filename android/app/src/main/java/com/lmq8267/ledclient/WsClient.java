@@ -1,11 +1,15 @@
 package com.lmq8267.ledclient;
 
+import android.os.Build;
+import android.os.SystemClock;
 import android.util.Base64;
+import android.util.Log;
 
 import org.json.JSONObject;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.Socket;
@@ -13,12 +17,19 @@ import java.net.URI;
 import java.security.SecureRandom;
 import java.util.Locale;
 
+import javax.net.ssl.SSLParameters;
+import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
 
 final class WsClient {
+    private static final String TAG = "LedOverlay";
     private static final int CONNECT_TIMEOUT_MS = 5000;
     private static final int READ_TIMEOUT_MS = 60000;
     private static final int HEARTBEAT_INTERVAL_MS = 20000;
+    /** 连续 3 个心跳周期都没收到 pong 才判定链路已死，避免一次抖动就重连。 */
+    private static final long PONG_TIMEOUT_MS = HEARTBEAT_INTERVAL_MS * 3L;
+    /** 即使旧服务端不回 pong，也不能无限期读阻塞：80 秒没有任何入站帧就重连。 */
+    private static final int IDLE_READ_TIMEOUT_MS = 80000;
 
     interface Listener {
         void onOpen();
@@ -29,6 +40,8 @@ final class WsClient {
     private final String[] urls;
     private final Listener listener;
     private volatile boolean running;
+    /** stop() 之后线程可能还没真正启动；这个标记负责挡住“刚停就被 connectLoop 重新拉起”。 */
+    private volatile boolean stopped;
     private volatile boolean openedInAttempt;
     private volatile boolean open;
     private int preferredUrlIndex = 0;
@@ -36,6 +49,11 @@ final class WsClient {
     private BufferedInputStream in;
     private BufferedOutputStream out;
     private Thread heartbeatThread;
+    /** 每次连接/关闭都递增，旧心跳线程看到代号变化就退出，避免它误关新连接的 socket。 */
+    private volatile long heartbeatGeneration;
+    /** 老版本服务端不回应 ping；只有确认对方会发 pong 后才启用超时重连，避免误伤旧服务端。 */
+    private volatile boolean pongSeen;
+    private volatile long lastPongAt;
 
     WsClient(String url, Listener listener) {
         this.urls = normalizeCandidates(url);
@@ -43,7 +61,10 @@ final class WsClient {
     }
 
     void connectLoop() {
-        running = true;
+        synchronized (this) {
+            if (stopped) return;
+            running = true;
+        }
         while (running) {
             Exception error = null;
             for (int n = 0; n < urls.length && running; n++) {
@@ -68,7 +89,10 @@ final class WsClient {
     }
 
     void stop() {
-        running = false;
+        synchronized (this) {
+            stopped = true;
+            running = false;
+        }
         close();
     }
 
@@ -93,13 +117,26 @@ final class WsClient {
         URI uri = new URI(url);
         boolean secure = "wss".equalsIgnoreCase(uri.getScheme());
         int port = uri.getPort() > 0 ? uri.getPort() : (secure ? 443 : 80);
-        socket = secure
-                ? SSLSocketFactory.getDefault().createSocket()
-                : new Socket();
-        socket.connect(new InetSocketAddress(uri.getHost(), port), CONNECT_TIMEOUT_MS);
-        socket.setSoTimeout(READ_TIMEOUT_MS);
-        socket.setTcpNoDelay(true);
-        socket.setKeepAlive(true);
+        Socket raw = new Socket();
+        raw.connect(new InetSocketAddress(uri.getHost(), port), CONNECT_TIMEOUT_MS);
+        raw.setSoTimeout(READ_TIMEOUT_MS);
+        raw.setTcpNoDelay(true);
+        raw.setKeepAlive(true);
+        if (secure) {
+            // 必须设置 SNI 和主机名校验：旧实现用未连接的 SSLSocket + connect()，
+            // 既不发 SNI，也不校验证书域名，任何自签/中间人证书都能握手成功。
+            SSLSocket ssl = (SSLSocket) SSLSocketFactory.getDefault()
+                    .createSocket(raw, uri.getHost(), port, true);
+            // setEndpointIdentificationAlgorithm 是 API 24 才有的；minSdk 14 必须短路。
+            if (Build.VERSION.SDK_INT >= 24) {
+                SSLParameters params = ssl.getSSLParameters();
+                params.setEndpointIdentificationAlgorithm("HTTPS");
+                ssl.setSSLParameters(params);
+            }
+            socket = ssl;
+        } else {
+            socket = raw;
+        }
         in = new BufferedInputStream(socket.getInputStream());
         out = new BufferedOutputStream(socket.getOutputStream());
 
@@ -121,9 +158,12 @@ final class WsClient {
         if (!response.startsWith("HTTP/1.1 101") && !response.startsWith("HTTP/1.0 101")) {
             throw new IOException("websocket handshake failed");
         }
-        socket.setSoTimeout(0);
+        socket.setSoTimeout(IDLE_READ_TIMEOUT_MS);
         openedInAttempt = true;
         open = true;
+        // 每次新连接都重新认定 pong：断线期间残留的旧时间戳不能用来判断新链路。
+        pongSeen = false;
+        lastPongAt = SystemClock.elapsedRealtime();
         startHeartbeat();
         if (listener != null) listener.onOpen();
         readFrames();
@@ -132,15 +172,24 @@ final class WsClient {
     private void startHeartbeat() {
         Thread previous = heartbeatThread;
         if (previous != null) previous.interrupt();
+        final long generation = ++heartbeatGeneration;
         heartbeatThread = new Thread(new Runnable() {
             @Override public void run() {
-                while (running && open) {
+                while (running && open && generation == heartbeatGeneration) {
                     sleep(HEARTBEAT_INTERVAL_MS);
-                    if (!running || !open) break;
+                    if (!running || !open || generation != heartbeatGeneration) break;
+                    long now = SystemClock.elapsedRealtime();
+                    if (pongSeen && now - lastPongAt > PONG_TIMEOUT_MS) {
+                        Log.w(TAG, "pong 超时，主动重连");
+                        if (generation == heartbeatGeneration) close();
+                        break;
+                    }
                     try {
                         sendText("{\"type\":\"ping\"}");
                     } catch (Exception e) {
-                        close();
+                        // 旧心跳线程可能在新连接建立后才从阻塞写里返回，
+                        // 这时不能让它 close 掉新连接的 socket。
+                        if (generation == heartbeatGeneration) close();
                         break;
                     }
                 }
@@ -151,10 +200,12 @@ final class WsClient {
     }
 
     private void readFrames() throws IOException {
+        ByteArrayOutputStream fragmented = null;
         while (running) {
             int b0 = in.read();
             int b1 = in.read();
             if (b0 < 0 || b1 < 0) throw new IOException("closed");
+            boolean fin = (b0 & 0x80) != 0;
             int opcode = b0 & 0x0f;
             int len = b1 & 0x7f;
             if (len == 126) {
@@ -170,7 +221,7 @@ final class WsClient {
                     if (b < 0) throw new IOException("closed");
                     longLen = (longLen << 8) | b;
                 }
-                if (longLen > 1024 * 1024) throw new IOException("frame too large");
+                if (longLen < 0 || longLen > 1024 * 1024) throw new IOException("frame too large");
                 len = (int) longLen;
             }
             byte[] mask = null;
@@ -181,9 +232,63 @@ final class WsClient {
             byte[] payload = new byte[len];
             readFully(payload);
             if (mask != null) for (int i = 0; i < len; i++) payload[i] ^= mask[i % 4];
-            if (opcode == 8) throw new IOException("closed");
-            if (opcode == 1 && listener != null) listener.onText(new String(payload, "UTF-8"));
+
+            // 控制帧可以夹在分片中间；标准 ping 必须回 pong，否则反代可能主动断开。
+            if (opcode == 0x9) {
+                if (len <= 125) sendControl(0xA, payload);
+                continue;
+            }
+            if (opcode == 0xA) {
+                pongSeen = true;
+                lastPongAt = SystemClock.elapsedRealtime();
+                continue;
+            }
+            if (opcode == 0x8) throw new IOException("closed");
+
+            if (opcode == 0x0) {
+                if (fragmented == null) continue;
+                if (fragmented.size() + len > 1024 * 1024) throw new IOException("message too large");
+                fragmented.write(payload, 0, len);
+                if (fin) {
+                    byte[] complete = fragmented.toByteArray();
+                    fragmented = null;
+                    handleText(complete);
+                }
+            } else if (opcode == 0x1) {
+                fragmented = null;
+                if (!fin) {
+                    fragmented = new ByteArrayOutputStream();
+                    fragmented.write(payload, 0, len);
+                } else {
+                    handleText(payload);
+                }
+            }
+            // 二进制帧不在本协议内，忽略；继续读下一帧。
         }
+    }
+
+    private void handleText(byte[] payload) {
+        String text = new String(payload, java.nio.charset.Charset.forName("UTF-8"));
+        // pong 是链路层信号，不交给业务层，避免把心跳写进消息日志。
+        // 必须精确匹配，不能只看是否包含 "pong"：任务正文刚好是 pong 时会被误吞。
+        if ("{\"type\":\"pong\"}".equals(text.trim())) {
+            pongSeen = true;
+            lastPongAt = SystemClock.elapsedRealtime();
+            return;
+        }
+        if (listener != null) listener.onText(text);
+    }
+
+    private synchronized void sendControl(int opcode, byte[] payload) throws IOException {
+        if (out == null) throw new IOException("not connected");
+        if (payload.length > 125) payload = new byte[0];
+        out.write(0x80 | opcode);
+        out.write(0x80 | payload.length);
+        byte[] mask = new byte[4];
+        new SecureRandom().nextBytes(mask);
+        out.write(mask);
+        for (int i = 0; i < payload.length; i++) out.write(payload[i] ^ mask[i % 4]);
+        out.flush();
     }
 
     private synchronized void sendText(String text) throws IOException {
@@ -232,6 +337,7 @@ final class WsClient {
 
     private void close() {
         open = false;
+        heartbeatGeneration++;
         Thread thread = heartbeatThread;
         heartbeatThread = null;
         if (thread != null) thread.interrupt();

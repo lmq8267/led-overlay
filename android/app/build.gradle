@@ -2,7 +2,12 @@ plugins {
     id "com.android.application"
 }
 
-def appVersion = "${new Date().format("yyyyMMdd")}-${"git rev-parse --short HEAD".execute(null, rootDir).text.trim() ?: "unknown"}"
+def buildTime = new Date()
+def appVersion = "${buildTime.format("yyyyMMdd")}-${"git rev-parse --short HEAD".execute(null, rootDir).text.trim() ?: "unknown"}"
+def buildCal = Calendar.getInstance()
+buildCal.setTime(buildTime)
+// 用日历字段算整数，避免某些区域设置下 SimpleDateFormat 输出非拉丁数字导致 parseInt 失败。
+def appVersionCode = buildCal.get(Calendar.YEAR) * 10000 + (buildCal.get(Calendar.MONTH) + 1) * 100 + buildCal.get(Calendar.DAY_OF_MONTH)
 
 android {
     namespace "com.lmq8267.ledclient"
@@ -12,7 +17,7 @@ android {
         applicationId "com.lmq8267.ledclient"
         minSdk 14
         targetSdk 35
-        versionCode 1
+        versionCode appVersionCode
         versionName appVersion
         vectorDrawables.generatedDensities = ["mdpi", "hdpi", "xhdpi", "xxhdpi", "xxxhdpi"]
     }

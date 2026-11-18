@@ -8,6 +8,7 @@ import android.graphics.PorterDuff;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.view.View;
 
 final class OverlayView extends View {
@@ -25,7 +26,7 @@ final class OverlayView extends View {
     private final Runnable tick = new Runnable() {
         @Override public void run() {
             if (message == null) return;
-            long now = System.currentTimeMillis();
+            long now = SystemClock.elapsedRealtime();
             float elapsedSeconds = Math.max(0.001f, (now - lastFrameAt) / 1000f);
             lastFrameAt = now;
             x -= message.speed * getResources().getDisplayMetrics().density * elapsedSeconds;
@@ -65,7 +66,7 @@ final class OverlayView extends View {
         paint.setTextSize(Math.max(30, h * 0.62f));
         x = w;
         completedLoops = 0;
-        lastFrameAt = System.currentTimeMillis();
+        lastFrameAt = SystemClock.elapsedRealtime();
         setVisibility(VISIBLE);
         bringToFront();
         handler.post(tick);
@@ -74,11 +75,17 @@ final class OverlayView extends View {
 
     boolean cancel(String taskId) {
         if (message == null || !message.taskId.equals(taskId)) return false;
-        message = null;
-        handler.removeCallbacks(tick);
+        stop();
         setVisibility(INVISIBLE);
         invalidate();
         return true;
+    }
+
+    /** 服务销毁时调用：窗口即将移除，必须停掉 16ms 刷新和完成回调，避免服务死后还在跑。 */
+    void stop() {
+        message = null;
+        listener = null;
+        handler.removeCallbacks(tick);
     }
 
     boolean isDisplaying() {
