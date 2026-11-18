@@ -125,8 +125,8 @@ final class WsClient {
         if (secure) {
             // 必须设置 SNI 和主机名校验：旧实现用未连接的 SSLSocket + connect()，
             // 既不发 SNI，也不校验证书域名，任何自签/中间人证书都能握手成功。
-            SSLSocket ssl = (SSLSocket) SSLSocketFactory.getDefault()
-                    .createSocket(raw, uri.getHost(), port, true);
+            SSLSocketFactory factory = (SSLSocketFactory) SSLSocketFactory.getDefault();
+            SSLSocket ssl = (SSLSocket) factory.createSocket(raw, uri.getHost(), port, true);
             // setEndpointIdentificationAlgorithm 是 API 24 才有的；minSdk 14 必须短路。
             if (Build.VERSION.SDK_INT >= 24) {
                 SSLParameters params = ssl.getSSLParameters();

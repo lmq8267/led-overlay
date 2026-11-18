@@ -35,6 +35,13 @@ jobs:
 
       - name: 设置 Android SDK 环境
         uses: android-actions/setup-android@v3
+        with:
+          # setup-android 默认还会安装 tools，但新版 cmdline-tools 已经不再提供这个包。
+          # 这里只安装构建实际需要的组件，避免在 sdkmanager tools 阶段直接失败。
+          packages: >-
+            platform-tools
+            platforms;android-35
+            build-tools;35.0.0
 
       - name: 设置 Gradle 环境
         uses: gradle/actions/setup-gradle@v4
