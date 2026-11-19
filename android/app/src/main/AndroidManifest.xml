@@ -7,6 +7,12 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- 同步框架自愈：账户 + 同步设置都是安装时权限，不需要用户在设置里确认，也不需要 adb。
+         缺 READ/WRITE_SYNC_SETTINGS 时 setSyncAutomatically/addPeriodicSync 会抛 SecurityException，
+         适配器永远不启用，这条拉起通道会静默失效。 -->
+    <uses-permission android:name="android.permission.AUTHENTICATE_ACCOUNTS" />
+    <uses-permission android:name="android.permission.READ_SYNC_SETTINGS" />
+    <uses-permission android:name="android.permission.WRITE_SYNC_SETTINGS" />
 
     <application
         android:allowBackup="true"
@@ -17,10 +23,14 @@
         <activity
             android:name=".MainActivity"
             android:configChanges="orientation|screenSize|keyboardHidden"
-            android:exported="true">
+            android:exported="true"
+            android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+                <!-- 小米电视桌面（MiTV TVHome）的卡片区和「常用」只列带 LEANBACK 的应用，
+                     只声明 LAUNCHER 会出现“装好了但电视上找不到入口”。 -->
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
         </activity>
 
@@ -36,15 +46,50 @@
 
         <!-- 存活锚点：只等系统重新绑定，不读取通知内容。
              强停后小米固件会清空无障碍授权，但会重绑已授权的通知监听，
-             这是本机能可靠把进程拉回来的路径（quizgate 在 MiTV-MFTR0 实测约 150ms）。 -->
+             这是本机能可靠把进程拉回来的路径（quizgate 在 MiTV-MFTR0 实测约 150ms）。
+             exported 用官方写法 true：system_server 以 UID 1000 bind 时 false 也能工作，
+             但那是未文档化行为，换固件可能失效。 -->
         <service
             android:name=".LedNotifProbe"
             android:enabled="true"
-            android:exported="false"
+            android:exported="true"
+            android:label="@string/notification_listener_label"
             android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
             <intent-filter>
                 <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
+        </service>
+
+        <!-- 第三、四条拉起通道：JobScheduler（15 分钟周期，跨重启保留）与 AlarmManager（15 分钟）。
+             系统强停会连带清掉这两者，所以它们只覆盖"只杀进程"这一档，与通知监听互补。 -->
+        <service
+            android:name=".Watchdog"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+
+        <!-- 第五条拉起通道：同步框架自愈。系统强停后仍会被 SyncManager bind，
+             这是应用内唯一能清掉 stopped 标记的路径。不做任何数据交换。 -->
+        <service
+            android:name=".GuardAccountService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.accounts.AccountAuthenticator" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accounts.AccountAuthenticator"
+                android:resource="@xml/guard_account" />
+        </service>
+
+        <service
+            android:name=".GuardSyncService"
+            android:exported="true"
+            android:permission="android.permission.BIND_SYNC_ADAPTER">
+            <intent-filter>
+                <action android:name="android.content.SyncAdapter" />
+            </intent-filter>
+            <meta-data
+                android:name="android.content.SyncAdapter"
+                android:resource="@xml/guard_sync" />
         </service>
 
         <receiver
@@ -54,6 +99,14 @@
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <!-- 部分厂商的快速开机 / 断电冷启动走这些 action，小米待机基本不投递，
+                     但加上是零成本，覆盖其他固件。
+                     不声明 LOCKED_BOOT_COMPLETED：它只会投递给 directBootAware 组件，
+                     本接收器要在解锁后读 SharedPreferences，收不到也不该收。 -->
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="com.tcl.android.intent.action.BOOT_COMPLETED" />
+                <action android:name="com.hisense.intent.action.BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
 

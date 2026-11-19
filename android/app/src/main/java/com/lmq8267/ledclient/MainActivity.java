@@ -20,6 +20,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
 import android.provider.Settings;
+import android.text.InputType;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
@@ -450,6 +451,10 @@ public class MainActivity extends Activity {
         serverInput.setThreshold(0);
         refreshServerSuggestions();
         serverInput.setSingleLine(true);
+        // 必须显式设置 inputType：不设置时部分电视固件把它当成 TYPE_NULL，
+        // 输入法认为这不是可编辑控件，点进去像只读框、键盘永远不弹（MiTV-MFTR0 实测）。
+        // URI 变体让电视键盘直接给出 : 和 . ，填 IP:端口 更省事。
+        serverInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
         serverInput.setTextSize(13);
         serverInput.setDropDownVerticalOffset(dp(6));
         GradientDrawable popupBg = new GradientDrawable();
@@ -473,17 +478,36 @@ public class MainActivity extends Activity {
             @Override public void onFocusChange(View v, boolean hasFocus) {
                 applyInputFocusStyle(serverInput, hasFocus);
                 if (hasFocus) {
+                    // 这里不再 showDropDown：电视遥控器把焦点移到输入框时弹出的下拉会抢走焦点，
+                    // 结果“确定键”被下拉列表吃掉、输入法起不来。下拉改由触摸点击触发。
                     refreshServerSuggestions();
-                    serverInput.showDropDown();
                 } else {
                     saveAndRestartIfServerChanged();
                 }
             }
         });
+        // 电视遥控器的确定键不会自动拉起输入法，AutoCompleteTextView 的历史下拉还会吃掉按键。
+        // 这里显式把确定键转成“收起下拉 + 弹输入法”，否则点进输入框后无法输入。
+        serverInput.setOnKeyListener(new View.OnKeyListener() {
+            @Override public boolean onKey(View v, int keyCode, KeyEvent event) {
+                if (!isConfirmKey(keyCode)) return false;
+                if (event.getAction() == KeyEvent.ACTION_UP) {
+                    serverInput.dismissDropDown();
+                    showIme(serverInput);
+                }
+                return true;   // DOWN/UP 都消费，避免再触发一次 click 又把下拉弹出来
+            }
+        });
         serverInput.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
                 refreshServerSuggestions();
-                serverInput.showDropDown();
+                // 有历史地址时先让用户选；没有历史就直接弹键盘，
+                // 否则触摸点击看起来“没有任何反应”。
+                if (serverInput.getAdapter() != null && serverInput.getAdapter().getCount() > 0) {
+                    serverInput.showDropDown();
+                } else {
+                    showIme(serverInput);
+                }
             }
         });
         serverInput.setOnItemClickListener(new AdapterView.OnItemClickListener() {
@@ -931,11 +955,18 @@ public class MainActivity extends Activity {
                     }
                 }));
 
-        card.addView(permissionRow(
+        card.addView(permissionRowWithDivider(
                 getString(R.string.permission_boot),
                 Prefs.boot(this) ? getString(R.string.permission_enabled) : getString(R.string.permission_disabled),
                 Prefs.boot(this),
-                null));
+                new View.OnClickListener() {
+                    @Override public void onClick(View v) {
+                        // 系统级的“自启动白名单”是厂商私有的，只能把用户带到应用详情，
+                        // 由他自己在“应用管理/自启动”里放行；这里同时给一句路径提示。
+                        showTip(getString(R.string.toast_boot_system_hint), false);
+                        openAppDetailsSettings();
+                    }
+                }));
 
         addCard(card);
     }
@@ -1191,12 +1222,12 @@ public class MainActivity extends Activity {
         if (now - lastRecoveryAttemptAt < 10000L) return;
         lastRecoveryAttemptAt = now;
         Prefs.setConnectionState(this, Prefs.CONNECTION_CONNECTING);
-        LedService.start(this, Prefs.ACTION_RESTORE);
+        LedService.start(this, Prefs.ACTION_RESTORE, "app");
     }
 
     private void requestIdleOverlayCleanup() {
         if (!isAlive()) return;
-        LedService.start(this, Prefs.ACTION_CLEAN_IDLE_OVERLAY);
+        LedService.start(this, Prefs.ACTION_CLEAN_IDLE_OVERLAY, "app");
     }
 
     /** 真实存活判断：enabled 是意图，心跳才是服务此刻是否还活着。 */
@@ -1228,7 +1259,7 @@ public class MainActivity extends Activity {
                 return;
             }
             Prefs.setConnectionState(this, Prefs.CONNECTION_CONNECTING);
-            LedService.start(this, Prefs.ACTION_RESTORE);
+            LedService.start(this, Prefs.ACTION_RESTORE, "app");
             updateServerStatusCard();
         }
     }
@@ -1261,7 +1292,7 @@ public class MainActivity extends Activity {
         // 电视和手机走同一条路径：LedService 是唯一 WebSocket/悬浮窗宿主。
         Prefs.setEnabled(this, true);
         Prefs.setConnectionState(this, Prefs.CONNECTION_CONNECTING);
-        LedService.start(this, Prefs.ACTION_START);
+        LedService.start(this, Prefs.ACTION_START, "app");
         updateRunButton(true);
         updateStatus(isAlive());
         updateServerStatusCard();
@@ -1652,6 +1683,30 @@ public class MainActivity extends Activity {
         return keyCode == KeyEvent.KEYCODE_DPAD_CENTER
                 || keyCode == KeyEvent.KEYCODE_ENTER
                 || keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER;
+    }
+
+    /**
+     * 显式拉起输入法。
+     *
+     * <p>电视遥控器的“确定”键只在部分固件上等同于触摸点击，小米等机型按确定进入输入框
+     * 不会自动弹 IME（实测 MiTV-MFTR0 / Android 11：焦点在 AutoCompleteTextView 上，
+     * 按确定没有任何键盘出现）。showSoftInput 在 IME 连接尚未建立的首次点击时会返回 false，
+     * 所以失败后延迟重试一次，仍失败再用 SHOW_FORCED 兜底。
+     */
+    private void showIme(final View view) {
+        view.requestFocus();
+        final InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+        if (imm == null) return;
+        imm.showSoftInput(view, InputMethodManager.SHOW_IMPLICIT);
+        // showSoftInput 的返回值不可靠：电视固件上既有返回 true 却没显示，也有返回 false 后
+        // 才显示。稍后用 isActive 复核一次，没起来再强制请求。
+        view.postDelayed(new Runnable() {
+            @Override public void run() {
+                if (!imm.isActive(view)) {
+                    imm.showSoftInput(view, InputMethodManager.SHOW_FORCED);
+                }
+            }
+        }, 150);
     }
 
     // ── 按钮触摸反馈 ──

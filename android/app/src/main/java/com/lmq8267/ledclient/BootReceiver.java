@@ -3,15 +3,17 @@ package com.lmq8267.ledclient;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.os.Build;
+import android.os.UserManager;
 import android.util.Log;
 
 /**
- * 开机/覆盖升级后的兜底恢复入口。
+ * 开机 / 覆盖升级 / 复活闹钟的统一入口。
  *
  * <p>注意：小米电视在电源键关机时会执行 killAllThirdApp，把第三方包置为 stopped，
  * 被强停的包收不到 BOOT_COMPLETED（quizgate 已在 MiTV-MFTR0 实测，见其 ADR-4）。
- * 所以这里只是兜底，真正可靠的复活点是 LedNotifProbe 的通知监听重绑。
- * 但兜底也不能再“只写状态不启动服务”——那会让界面显示运行中、实际什么都没起。
+ * 所以这里只是兜底，真正可靠的复活点是 LedNotifProbe 的通知监听重绑，
+ * 强停后的二次兜底是 Watchdog 的作业/闹钟与 GuardSync 的同步框架。
  */
 public class BootReceiver extends BroadcastReceiver {
     private static final String TAG = "LedOverlay";
@@ -19,9 +21,27 @@ public class BootReceiver extends BroadcastReceiver {
     @Override
     public void onReceive(Context context, Intent intent) {
         String action = intent == null ? "" : intent.getAction();
-        boolean boot = Intent.ACTION_BOOT_COMPLETED.equals(action);
+
+        // 复活闹钟：只发恢复意图，屏幕状态由 KeepAlive 判断
+        if (Watchdog.ACTION_REVIVE.equals(action)) {
+            KeepAlive.restoreIfEnabled(context, "alarm");
+            return;
+        }
+
+        boolean boot = Intent.ACTION_BOOT_COMPLETED.equals(action)
+                || "android.intent.action.QUICKBOOT_POWERON".equals(action)
+                || "com.htc.intent.action.QUICKBOOT_POWERON".equals(action)
+                || "com.tcl.android.intent.action.BOOT_COMPLETED".equals(action)
+                || "com.hisense.intent.action.BOOT_COMPLETED".equals(action);
         boolean replaced = Intent.ACTION_MY_PACKAGE_REPLACED.equals(action);
         if (!boot && !replaced) return;
+
+        // 个别厂商的快速开机广播可能在用户解锁前到达，此时 SharedPreferences（CE 存储）不可读，
+        // 强行读取会抛 IllegalStateException。等 BOOT_COMPLETED 或通知监听重绑再处理。
+        if (!isUserUnlocked(context)) {
+            Log.i(TAG, "开机恢复延后 action=" + action + " user_locked");
+            return;
+        }
         if (Prefs.server(context).trim().length() == 0) return;
 
         if (boot) {
@@ -34,7 +54,13 @@ public class BootReceiver extends BroadcastReceiver {
         }
 
         Log.i(TAG, "开机恢复 action=" + action);
-        // 先判断屏幕：开机瞬间屏幕可能还没亮，直接起前台服务会把待机电视点亮。
+        // 排程与自愈注册都在 LedService.onCreate/onStartCommand 里做，这里只需要拉起服务
         KeepAlive.restoreIfEnabled(context, "boot:" + action);
+    }
+
+    private static boolean isUserUnlocked(Context context) {
+        if (Build.VERSION.SDK_INT < 24) return true;
+        UserManager manager = (UserManager) context.getSystemService(Context.USER_SERVICE);
+        return manager == null || manager.isUserUnlocked();
     }
 }

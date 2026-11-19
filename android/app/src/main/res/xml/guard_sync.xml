@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  挂在系统 settings provider 上的本地同步：系统每次写设置都会触发一次 LOCAL 同步，
+  SyncManager 随之显式 bind 我们的适配器，从而把进程拉回来（强停后的 stopped 状态也拦不住）。
+
+  supportsUploading 必须为 true：SettingsProvider 的写入带 SYNC_EXTRAS_UPLOAD，
+  SyncManager 会直接丢弃发给 supportsUploading="false" 适配器的 upload 同步，
+  事件通道会完全失效（dumpsys content 里只剩 PERIODIC）。
+-->
+<sync-adapter xmlns:android="http://schemas.android.com/apk/res/android"
+    android:contentAuthority="settings"
+    android:accountType="com.lmq8267.ledclient"
+    android:userVisible="false"
+    android:supportsUploading="true"
+    android:allowParallelSyncs="false"
+    android:isAlwaysSyncable="true" />

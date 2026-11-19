@@ -1,5 +1,6 @@
 <resources>
     <string name="app_name">LED悬浮屏</string>
+    <string name="notification_listener_label">LED悬浮屏 · 后台恢复（不读取通知）</string>
     <string name="server_address">服务端地址</string>
     <string name="server_address_hint">服务端地址，例如 ws.test.com 或 192.168.1.10:12366，自动兼容 ws/wss</string>
     <string name="boot_start">开机自启</string>
@@ -30,7 +31,7 @@
     <string name="about_version">版本号</string>
     <string name="about_android">安卓版本</string>
     <string name="permission_status">权限状态</string>
-    <string name="permission_status_desc">点击条目跳转到对应系统授权页</string>
+    <string name="permission_status_desc">点击条目打开对应的系统页面</string>
     <string name="permission_notifications">通知权限</string>
     <string name="permission_overlay">悬浮窗权限</string>
     <string name="permission_notification_access">通知使用权</string>
@@ -47,11 +48,12 @@
     <string name="copy_all">复制最近日志</string>
     <string name="clear_logs">清空日志</string>
     <string name="overlay_permission">需要悬浮窗权限，才能在其他应用上方显示消息。</string>
-    <string name="notification_access_permission">需要通知使用权，系统强停后才能把客户端自动拉回来。</string>
-    <string name="notification_permission">需要通知权限，才能稳定保持后台服务运行。</string>
+    <string name="notification_access_permission">通知使用权用于强停后让系统重绑客户端并把它拉回来（通常几秒内，但不保证每次都成功）。</string>
+    <string name="notification_permission">通知权限只决定 Android 13+ 下前台服务通知是否显示，不影响服务本身运行。</string>
     <string name="toast_boot_enabled">开机自启已开启</string>
     <string name="toast_boot_disabled">开机自启已关闭</string>
     <string name="toast_boot_failed">开机自启设置失败：%1$s</string>
+    <string name="toast_boot_system_hint">请在系统的应用管理里允许本应用自启动 / 后台运行</string>
     <string name="toast_started">已启动</string>
     <string name="toast_stopped">已停止</string>
     <string name="toast_server_empty">服务端地址为空</string>
@@ -59,6 +61,7 @@
     <string name="toast_logs_cleared">日志已清空</string>
     <string name="toast_history_cleared">历史记录已清空</string>
     <string name="log_overlay_permission_missing">缺少悬浮窗权限</string>
+    <string name="log_service_start">服务启动 via=%1$s action=%2$s</string>
     <string name="log_connecting">正在连接 %1$s</string>
     <string name="log_connected">已连接 %1$s</string>
     <string name="log_message">收到消息 %1$s</string>
@@ -66,7 +69,7 @@
     <string name="log_disconnected">已断开 %1$s</string>
     <string name="log_overlay_add_failed">悬浮窗添加失败 %1$s</string>
     <string name="tv_help_title">电视设备 / 保活授权</string>
-    <string name="tv_help_desc">小米电视等固件隐藏了悬浮窗和通知使用权入口，先用 adb connect IP 连接电视，再执行：</string>
+    <string name="tv_help_desc">小米电视等固件常常裁掉悬浮窗和通知使用权入口，先用 adb 连接电视，再执行：</string>
     <string name="tv_adb_command">adb shell appops set %s SYSTEM_ALERT_WINDOW allow</string>
     <string name="tv_adb_command2">adb shell cmd notification allow_listener %s</string>
     <string name="tv_adb_command3">adb shell appops set %s RUN_ANY_IN_BACKGROUND allow</string>

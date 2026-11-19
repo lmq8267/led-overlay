@@ -145,6 +145,22 @@ final class Prefs {
         return age >= 0L && age < HEARTBEAT_FRESH_MS;
     }
 
+    /**
+     * 本次开机是否已经运行过服务。
+     *
+     * <p>用途：JobScheduler / 同步框架在重启后也会被系统调起，如果直接恢复，就会绕过用户的
+     * “开机自启”开关。心跳里记录了写入时的 BOOT_COUNT，与当前值比对即可区分
+     * “重启后第一次被拉起”和“本次开机内服务被杀后的恢复”，后者不应该受开机开关限制。
+     */
+    static boolean ranThisBoot(Context context) {
+        int stored = store(context).getInt(KEY_BOOT_COUNT, -1);
+        int current = bootCount(context);
+        // API 24 以下没有 Settings.Global.BOOT_COUNT，无法区分“重启后第一次”和“本次开机内被杀”。
+        // 这种情况下宁可恢复（返回 true，不受开机开关约束），也不要让老设备的保活通道被误关。
+        if (stored < 0 || current < 0) return true;
+        return stored == current;
+    }
+
     /** 只清运行态，不动 enabled：服务被系统杀掉时用户意图仍然应该保留，交给通知监听锚点拉起。 */
     static void clearRuntimeState(Context context) {
         store(context).edit()

@@ -48,7 +48,8 @@ final class KeepAlive {
     }
 
     static void start(Context context, String reason) {
-        LedService.start(context, Prefs.ACTION_RESTORE);
+        // reason 同时作为启动来源写进日志页（boot:…/job/alarm/guard-sync/notification_listener）
+        LedService.start(context, Prefs.ACTION_RESTORE, reason);
         Log.i(TAG, "保活启动 reason=" + reason);
     }
 

@@ -1,5 +1,7 @@
 <resources>
     <string name="app_name">LED Overlay</string>
+    <!-- 系统“通知使用权”列表里显示的名字；明确写出不读取通知，减少授权顾虑 -->
+    <string name="notification_listener_label">LED Overlay · background recovery (does not read notifications)</string>
     <string name="server_address">Server address</string>
     <string name="server_address_hint">Server address, for example ws.test.com or 192.168.1.10:12366; ws/wss auto</string>
     <string name="boot_start">Start on boot</string>
@@ -30,7 +32,7 @@
     <string name="about_version">Version</string>
     <string name="about_android">Android</string>
     <string name="permission_status">Permission status</string>
-    <string name="permission_status_desc">Tap an item to open the matching system settings page</string>
+    <string name="permission_status_desc">Tap an item to open the related system page</string>
     <string name="permission_notifications">Notifications</string>
     <string name="permission_overlay">Overlay</string>
     <string name="permission_notification_access">Notification access</string>
@@ -47,11 +49,12 @@
     <string name="copy_all">Copy recent</string>
     <string name="clear_logs">Clear logs</string>
     <string name="overlay_permission">Overlay permission is required to show messages above other apps.</string>
-    <string name="notification_access_permission">Notification access is required so the system can revive the client after a force-stop.</string>
-    <string name="notification_permission">Notification permission is required to keep the background service running.</string>
+    <string name="notification_access_permission">Notification access lets the system rebind the client and revive it after a force-stop (usually within seconds, but not guaranteed).</string>
+    <string name="notification_permission">Notification permission only controls whether the foreground-service notification is visible on Android 13+. The service keeps running either way.</string>
     <string name="toast_boot_enabled">Start on boot enabled</string>
     <string name="toast_boot_disabled">Start on boot disabled</string>
     <string name="toast_boot_failed">Start on boot failed: %1$s</string>
+    <string name="toast_boot_system_hint">Allow autostart / background for this app in the system app management</string>
     <string name="toast_started">Started</string>
     <string name="toast_stopped">Stopped</string>
     <string name="toast_server_empty">Server address is empty</string>
@@ -59,6 +62,7 @@
     <string name="toast_logs_cleared">Logs cleared</string>
     <string name="toast_history_cleared">History cleared</string>
     <string name="log_overlay_permission_missing">Overlay permission missing</string>
+    <string name="log_service_start">Service started via=%1$s action=%2$s</string>
     <string name="log_connecting">Connecting %1$s</string>
     <string name="log_connected">Connected %1$s</string>
     <string name="log_message">Message %1$s</string>
@@ -66,7 +70,7 @@
     <string name="log_disconnected">Disconnected %1$s</string>
     <string name="log_overlay_add_failed">Overlay add failed %1$s</string>
     <string name="tv_help_title">TV / Keep-Alive Grants</string>
-    <string name="tv_help_desc">Xiaomi TVs hide the overlay and notification-access pages. Connect with adb first, then run:</string>
+    <string name="tv_help_desc">Xiaomi TVs often trim the overlay and notification-access pages. Connect with adb first, then run:</string>
     <string name="tv_adb_command">adb shell appops set %s SYSTEM_ALERT_WINDOW allow</string>
     <string name="tv_adb_command2">adb shell cmd notification allow_listener %s</string>
     <string name="tv_adb_command3">adb shell appops set %s RUN_ANY_IN_BACKGROUND allow</string>

@@ -27,6 +27,13 @@ if "%ADB_IP%"=="" (
     pause
     exit /b 1
 )
+:: 只允许 IP / 主机名合法字符，避免 & | > 之类的 cmd 元字符进入后续命令
+echo %ADB_IP% | findstr /r /c:"^[0-9A-Za-z.:_-][0-9A-Za-z.:_-]*$" >nul
+if %ERRORLEVEL% neq 0 (
+    echo [!] IP 地址包含非法字符
+    pause
+    exit /b 1
+)
 
 :: ── 输入端口（默认 5555）──
 set ADB_PORT=5555
@@ -42,12 +49,8 @@ echo.
 
 :: ── 连接 ──
 echo [1/6] 正在连接 %ADB_IP%:%ADB_PORT% ...
+:: adb connect 连不上时也常返回 0，这里不看 ERRORLEVEL，统一交给下一步 get-state 判断
 adb connect %ADB_IP%:%ADB_PORT%
-if %ERRORLEVEL% neq 0 (
-    echo [!] 连接失败，请检查 IP 和端口是否正确
-    pause
-    exit /b 1
-)
 echo.
 echo [2/6] 检查授权状态...
 
@@ -68,12 +71,24 @@ if %ERRORLEVEL% neq 0 (
 echo     [OK] 已授权
 echo.
 
+:: 应用没装的话，后面的 appops / 通知授权都会“成功但无效”，先挡住
+set APP_PATH=
+for /f "delims=" %%i in ('adb -s %ADB_IP%:%ADB_PORT% shell pm path com.lmq8267.ledclient 2^>nul') do set APP_PATH=%%i
+if not defined APP_PATH (
+    echo [!] 设备上没有找到 com.lmq8267.ledclient，请先安装 APK
+    pause
+    exit /b 1
+)
+echo     [OK] 应用已安装
+echo.
+
 :: ── 确认 ──
 echo ╔══════════════════════════════════════════╗
 echo ║  即将执行以下操作：                       ║
 echo ║  1. SYSTEM_ALERT_WINDOW  → 允许悬浮窗    ║
 echo ║  2. RUN_ANY_IN_BACKGROUND→ 允许后台运行  ║
-echo ║  3. 通知使用权            → 强停后复活    ║
+echo ║  3. 通知权限 / 电池优化   → 减少被清理    ║
+echo ║  4. 通知使用权            → 强停后复活    ║
 echo ╚══════════════════════════════════════════╝
 echo.
 set /p CONFIRM=是否继续？(Y/n)：
@@ -89,10 +104,16 @@ adb -s %ADB_IP%:%ADB_PORT% shell appops set com.lmq8267.ledclient SYSTEM_ALERT_W
 echo    [OK] SYSTEM_ALERT_WINDOW = allow
 echo.
 
-echo [4/6] 设置后台运行权限...
-adb -s %ADB_IP%:%ADB_PORT% shell appops set com.lmq8267.ledclient RUN_IN_BACKGROUND allow
-adb -s %ADB_IP%:%ADB_PORT% shell appops set com.lmq8267.ledclient RUN_ANY_IN_BACKGROUND allow
+echo [4/6] 设置后台运行、通知权限与电池优化...
+adb -s %ADB_IP%:%ADB_PORT% shell appops set com.lmq8267.ledclient RUN_IN_BACKGROUND allow >nul 2>&1
+adb -s %ADB_IP%:%ADB_PORT% shell appops set com.lmq8267.ledclient RUN_ANY_IN_BACKGROUND allow >nul 2>&1
 echo    [OK] RUN_IN_BACKGROUND / RUN_ANY_IN_BACKGROUND = allow
+:: Android 13+ 才有 POST_NOTIFICATIONS；低版本会报错，忽略即可
+adb -s %ADB_IP%:%ADB_PORT% shell pm grant com.lmq8267.ledclient android.permission.POST_NOTIFICATIONS >nul 2>&1
+echo    [OK] POST_NOTIFICATIONS（Android 13+）
+:: 电视通常没有 Doze，这条无害；手机/平板上能减少休眠冻结
+adb -s %ADB_IP%:%ADB_PORT% shell dumpsys deviceidle whitelist +com.lmq8267.ledclient >nul 2>&1
+echo    [OK] 电池优化白名单
 echo.
 
 echo [5/6] 授予通知使用权（强停后的复活锚点）...
@@ -122,6 +143,9 @@ echo.
 echo [6/6] 验证权限...
 adb -s %ADB_IP%:%ADB_PORT% shell appops get com.lmq8267.ledclient | findstr "SYSTEM_ALERT_WINDOW RUN_IN_BACKGROUND RUN_ANY_IN_BACKGROUND"
 adb -s %ADB_IP%:%ADB_PORT% shell settings get secure enabled_notification_listeners | findstr ledclient
+echo --- 作业 / 同步账户（应用启动过一次后才会出现）---
+adb -s %ADB_IP%:%ADB_PORT% shell dumpsys jobscheduler 2>nul | findstr /i ledclient
+adb -s %ADB_IP%:%ADB_PORT% shell dumpsys account 2>nul | findstr /i ledclient
 echo.
 
 echo ╔══════════════════════════════════════════╗

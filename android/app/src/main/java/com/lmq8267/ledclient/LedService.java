@@ -1,5 +1,6 @@
 package com.lmq8267.ledclient;
 
+import android.app.AlarmManager;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -15,6 +16,7 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.provider.Settings;
 import android.util.Log;
 import android.view.Gravity;
@@ -35,6 +37,8 @@ import java.util.concurrent.TimeUnit;
 
 public class LedService extends Service {
     private static final String TAG = "LedOverlay";
+    /** 启动来源，写进日志页，用来回答"这次是谁把我拉起来的"。 */
+    static final String EXTRA_VIA = "via";
     private static final long HEARTBEAT_INTERVAL_MS = 5_000L;
     private WsClient ws;
     private Thread thread;
@@ -43,6 +47,14 @@ public class LedService extends Service {
     private volatile String ackSecret = "";
     /** onDestroy 之后网络回调仍可能并发进入 startClient；这个标记保证不会创建停不掉的连接。 */
     private volatile boolean destroyed;
+    /**
+     * 进程内的存活标记：只有本进程真的创建过服务才为 true。
+     *
+     * <p>为什么不能用 Prefs.running / 心跳判断：强停不会走 onDestroy，running 会永久停在 true；
+     * 心跳还有 15 秒的新鲜窗口，强停后通知监听约 150ms 就重绑，此时心跳看起来仍然"新鲜"，
+     * 会把复活逻辑误判成"服务还在"。静态字段随进程消失，是唯一同进程内准确的判断。
+     */
+    private static volatile boolean alive;
     private volatile int connectionGeneration = 0;
     private WindowManager windowManager;
     private volatile OverlayView overlay;
@@ -95,6 +107,7 @@ public class LedService extends Service {
         // 必须无条件先 startForeground：Android 8+ 的 5 秒规则不会因为厂商拦截而放宽。
         // 前台服务类型改成 specialUse 后，MiTV 上不再走 dataSync 那套限制（quizgate 已实测）。
         startAsForeground();
+        alive = true;
         Prefs.setRunning(this, true);
         // 只有服务真的起来了才清“待恢复”标记；startForegroundService 被系统拒绝时保留，等下次锚点重试。
         Prefs.setPendingRestore(this, false);
@@ -108,6 +121,8 @@ public class LedService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent == null ? "" : intent.getAction();
+        String via = intent == null ? null : intent.getStringExtra(EXTRA_VIA);
+        if (via == null || via.length() == 0) via = "unknown";
         // 走到这里说明服务已经在运行（可能是复用实例），待恢复标记可以清掉。
         Prefs.setPendingRestore(this, false);
         if (Prefs.ACTION_CLEAN_IDLE_OVERLAY.equals(action)) {
@@ -119,6 +134,10 @@ public class LedService extends Service {
             // 该 action 用的是 startForegroundService：如果服务实例刚好被系统回收，
             // 系统会新建一个只有心跳、没有 WebSocket 的空壳。这里补一次连接，
             // 确保 CLEAN 不会把“运行中但没连接”的状态留在界面上。
+            // 排程放在这里而不是 onCreate：enabled=false 时这条路径会先 stopSelf，
+            // 不能在 onCreate 里无条件排程，否则用户已停止也会留下每 15 分钟的作业。
+            Watchdog.schedule(this);
+            logStart(via, action);
             startClient();
             return START_STICKY;
         }
@@ -133,13 +152,38 @@ public class LedService extends Service {
         }
 
         Prefs.touchHeartbeat(this);
+        // 到这里才确定服务要运行（enabled 已置 true 或本来就是 true）：
+        // 排两条定时兜底，再注册同步自愈。
+        Watchdog.schedule(this);
+        GuardSync.ensure(this);
+        Log.i(TAG, "同步自愈状态 " + GuardSync.status(this));
+        logStart(via, action);
         startClient();
         return START_STICKY;
+    }
+
+    /** 把启动来源写进用户可见的日志页，出问题时能回答“这次是谁拉起的”。 */
+    private void logStart(String via, String action) {
+        Log.i(TAG, "服务启动 via=" + via + " action=" + action);
+        LogStore.append(this, getString(R.string.log_service_start, via, action));
+    }
+
+    /**
+     * 从最近任务划掉时，部分系统会连带停止服务（手机/部分电视固件）。
+     * 2 秒后用不精确闹钟把自己拉回来；用户已停止时不排，避免"停了又活"。
+     *
+     * <p>强停（stopped）和断电不会回调这里——那两种场景由通知监听、同步框架和开机广播处理。
+     */
+    @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        if (Prefs.enabled(this)) scheduleRestart(this, 2000L, "task");
+        super.onTaskRemoved(rootIntent);
     }
 
     @Override
     public void onDestroy() {
         destroyed = true;
+        alive = false;
         if (mainHandler != null) {
             mainHandler.removeCallbacks(heartbeat);
             mainHandler.removeCallbacks(pendingAckFlusher);
@@ -161,12 +205,21 @@ public class LedService extends Service {
         Prefs.setConnectionState(this,
                 Prefs.enabled(this) ? Prefs.CONNECTION_CONNECTING : Prefs.CONNECTION_DISCONNECTED);
         Log.i(TAG, "服务销毁 enabled=" + Prefs.enabled(this));
+        // 有序停止（非用户点“停止”）后 5 秒拉回来。用户点停止时 enabled 已经是 false，
+        // 这里不会排程；强停/断电不会走 onDestroy，由通知监听、同步框架和开机广播接住。
+        if (Prefs.enabled(this)) scheduleRestart(this, 5000L, "destroy");
         super.onDestroy();
     }
 
     /** 所有复活入口统一走这里，避免每个调用点各写一遍 startForegroundService 的兼容分支。 */
     static void start(Context context, String action) {
+        start(context, action, "");
+    }
+
+    /** @param via 启动来源（boot/job/alarm/sync/listener/task/destroy…），只用于日志归因 */
+    static void start(Context context, String action, String via) {
         Intent intent = new Intent(context, LedService.class).setAction(action);
+        if (via != null && via.length() > 0) intent.putExtra(EXTRA_VIA, via);
         try {
             if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent);
             else context.startService(intent);
@@ -181,10 +234,45 @@ public class LedService extends Service {
         }
     }
 
+    /** 同进程内是否真的创建过服务；进程被杀后静态值随进程消失，比心跳更准确。 */
+    static boolean isRunning() {
+        return alive;
+    }
+
+    /**
+     * 被划掉 / 有序停止后的自恢复。
+     *
+     * <p>用 {@code AlarmManager.set} 而不是 setExact：不精确闹钟不需要 SCHEDULE_EXACT_ALARM
+     * 权限（Android 12+ 精确闹钟要用户授权），代价只是 Doze 下可能延迟。
+     */
+    static void scheduleRestart(Context context, long delayMs, String via) {
+        try {
+            Intent intent = new Intent(context, LedService.class)
+                    .setAction(Prefs.ACTION_RESTORE)
+                    .putExtra(EXTRA_VIA, via);
+            int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+            if (Build.VERSION.SDK_INT >= 23) flags |= PendingIntent.FLAG_IMMUTABLE;
+            PendingIntent pending;
+            if (Build.VERSION.SDK_INT >= 26) {
+                pending = PendingIntent.getForegroundService(context, 7410, intent, flags);
+            } else {
+                pending = PendingIntent.getService(context, 7410, intent, flags);
+            }
+            AlarmManager alarm = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
+            if (alarm == null) return;
+            alarm.set(AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime() + delayMs, pending);
+        } catch (Throwable t) {
+            Log.w(TAG, "无法排程任务移除后的重启", t);
+        }
+    }
+
     static void stop(Context context) {
         Prefs.setEnabled(context, false);
         Prefs.setPendingRestore(context, false);
         Prefs.clearRuntimeState(context);
+        // 用户已经点了停止：不能留两条每 15 分钟叫醒进程的定时器，也不能让同步框架继续 bind 进程
+        Watchdog.cancel(context);
+        GuardSync.pause(context);
         try { context.stopService(new Intent(context, LedService.class)); } catch (Throwable ignored) {}
     }
 

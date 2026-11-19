@@ -71,12 +71,21 @@ fi
 echo "    [OK] 已授权"
 echo ""
 
+# 应用没装的话，后面的 appops / 通知授权全部会“成功但无效”，先挡住
+if ! adb -s "${ADB_IP}:${ADB_PORT}" shell pm path "${PACKAGE}" 2>/dev/null | grep -q "package:"; then
+    echo "[!] 设备上没有找到 ${PACKAGE}，请先安装 APK"
+    exit 1
+fi
+echo "    [OK] 应用已安装"
+echo ""
+
 # ── 确认 ──
 echo "╔══════════════════════════════════════════╗"
 echo "║  即将执行以下操作：                       ║"
 echo "║  1. SYSTEM_ALERT_WINDOW  → 允许悬浮窗    ║"
 echo "║  2. RUN_ANY_IN_BACKGROUND→ 允许后台运行  ║"
-echo "║  3. 通知使用权            → 强停后复活    ║"
+echo "║  3. 通知权限 / 电池优化   → 减少被清理    ║"
+echo "║  4. 通知使用权            → 强停后复活    ║"
 echo "╚══════════════════════════════════════════╝"
 echo ""
 read -p "是否继续？(Y/n): " CONFIRM
@@ -88,19 +97,30 @@ echo ""
 
 # ── 设置权限 ──
 echo "[3/6] 设置悬浮窗权限..."
-adb -s "${ADB_IP}:${ADB_PORT}" shell appops set "${PACKAGE}" SYSTEM_ALERT_WINDOW allow
-echo "    [OK] SYSTEM_ALERT_WINDOW = allow"
+if adb -s "${ADB_IP}:${ADB_PORT}" shell appops set "${PACKAGE}" SYSTEM_ALERT_WINDOW allow 2>/dev/null; then
+    echo "    [OK] SYSTEM_ALERT_WINDOW = allow"
+else
+    echo "    [!] 设置失败，请在应用内点「悬浮窗权限」跳系统设置手动允许"
+fi
 echo ""
 
-echo "[4/6] 设置后台运行权限..."
-adb -s "${ADB_IP}:${ADB_PORT}" shell appops set "${PACKAGE}" RUN_IN_BACKGROUND allow
-adb -s "${ADB_IP}:${ADB_PORT}" shell appops set "${PACKAGE}" RUN_ANY_IN_BACKGROUND allow
+echo "[4/6] 设置后台运行、通知权限与电池优化..."
+adb -s "${ADB_IP}:${ADB_PORT}" shell appops set "${PACKAGE}" RUN_IN_BACKGROUND allow || true
+adb -s "${ADB_IP}:${ADB_PORT}" shell appops set "${PACKAGE}" RUN_ANY_IN_BACKGROUND allow || true
 echo "    [OK] RUN_IN_BACKGROUND / RUN_ANY_IN_BACKGROUND = allow"
+# Android 13+ 的通知权限：低版本没有这个权限，pm grant 会报
+# "not a changeable permission type"，忽略即可，不影响其他步骤
+adb -s "${ADB_IP}:${ADB_PORT}" shell pm grant "${PACKAGE}" android.permission.POST_NOTIFICATIONS >/dev/null 2>&1 || true
+echo "    [OK] POST_NOTIFICATIONS（Android 13+）"
+# 电池优化白名单：电视通常没有 Doze，这条无害；手机/平板上能减少休眠冻结
+adb -s "${ADB_IP}:${ADB_PORT}" shell dumpsys deviceidle whitelist +"${PACKAGE}" >/dev/null 2>&1 || true
+echo "    [OK] 电池优化白名单"
 echo ""
 
-echo "[5/6] 授予通知使用权（强停后的复活锚点）..."
-# 这是本机唯一可靠的复活路径：系统会重新绑定已授权的通知监听，
-# 顺带把进程拉回来。必须先授权，否则按电源键/强停后客户端不会自动恢复。
+echo "[5/6] 授予通知使用权（强停后响应最快的复活锚点）..."
+# 实测强停后约 150ms 系统就会重绑这个监听并把进程拉回来。
+# 它不是唯一路径：同步框架自愈（GuardSync）不需要 adb，会在服务启动后自动注册；
+# 作业/闹钟兜底同样不需要授权。这里仍然建议授权，因为它的空窗最短。
 if adb -s "${ADB_IP}:${ADB_PORT}" shell cmd notification allow_listener "${NOTIF_SERVICE}" 2>/dev/null; then
     echo "    [OK] 通知监听 = ${NOTIF_SERVICE}"
 else
@@ -113,15 +133,24 @@ else
     else
         NEW_LISTENERS="${OLD_LISTENERS}:${NOTIF_SERVICE}"
     fi
-    adb -s "${ADB_IP}:${ADB_PORT}" shell settings put secure enabled_notification_listeners "${NEW_LISTENERS}"
-    echo "    [OK] 通知监听 = ${NOTIF_SERVICE}（secure settings 兜底）"
+    if adb -s "${ADB_IP}:${ADB_PORT}" shell settings put secure enabled_notification_listeners "${NEW_LISTENERS}" 2>/dev/null; then
+        echo "    [OK] 通知监听 = ${NOTIF_SERVICE}（secure settings 兜底）"
+    else
+        echo "    [!] 写入失败，请在应用内查看「关于」页，按提示手动授权"
+    fi
 fi
 echo ""
 
 # ── 验证 ──
 echo "[6/6] 验证权限..."
-adb -s "${ADB_IP}:${ADB_PORT}" shell appops get "${PACKAGE}" 2>/dev/null | grep -E "SYSTEM_ALERT_WINDOW|RUN_IN_BACKGROUND|RUN_ANY_IN_BACKGROUND"
-adb -s "${ADB_IP}:${ADB_PORT}" shell settings get secure enabled_notification_listeners 2>/dev/null | grep -F "${PACKAGE}"
+echo "--- appops ---"
+adb -s "${ADB_IP}:${ADB_PORT}" shell appops get "${PACKAGE}" 2>/dev/null | grep -E "SYSTEM_ALERT_WINDOW|RUN_IN_BACKGROUND|RUN_ANY_IN_BACKGROUND" || echo "    （没有匹配到，可能固件不支持这些 appops）"
+echo "--- 通知使用权 ---"
+adb -s "${ADB_IP}:${ADB_PORT}" shell settings get secure enabled_notification_listeners 2>/dev/null | grep -F "${PACKAGE}" || echo "    （没有匹配到，通知监听未授权）"
+echo "--- 作业 / 闹钟 / 同步账户（应用启动过一次后才会出现）---"
+adb -s "${ADB_IP}:${ADB_PORT}" shell dumpsys jobscheduler 2>/dev/null | grep -i "${PACKAGE}" || true
+adb -s "${ADB_IP}:${ADB_PORT}" shell dumpsys alarm 2>/dev/null | grep -i "${PACKAGE}" || true
+adb -s "${ADB_IP}:${ADB_PORT}" shell dumpsys account 2>/dev/null | grep -i "${PACKAGE}" || true
 echo ""
 
 echo "╔══════════════════════════════════════════╗"
