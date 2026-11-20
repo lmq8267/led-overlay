@@ -36,6 +36,8 @@
     <string name="permission_notifications">Notifications</string>
     <string name="permission_overlay">Overlay</string>
     <string name="permission_notification_access">Notification access</string>
+    <string name="permission_app_management">App management / Special access</string>
+    <string name="permission_open">Open</string>
     <string name="permission_battery">Battery optimization</string>
     <string name="permission_boot">Start on boot</string>
     <string name="permission_granted">Granted</string>
@@ -46,6 +48,9 @@
     <string name="permission_not_ignored">Not ignored</string>
     <string name="permission_not_required">Not required</string>
     <string name="toast_open_settings_failed">Unable to open settings: %1$s</string>
+    <string name="toast_settings_not_on_tv">This TV firmware has no such settings page. Use the ADB commands below.</string>
+    <string name="toast_settings_failed_app_details">Unable to open this settings page. Allow it manually in App details.</string>
+    <string name="toast_settings_app_management">App management opened. Set it under Special access / App permissions.</string>
     <string name="copy_all">Copy recent</string>
     <string name="clear_logs">Clear logs</string>
     <string name="overlay_permission">Overlay permission is required to show messages above other apps.</string>

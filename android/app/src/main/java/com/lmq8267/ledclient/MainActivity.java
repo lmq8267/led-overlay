@@ -13,6 +13,7 @@ import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.StateListDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -944,6 +945,18 @@ public class MainActivity extends Activity {
                     }
                 }));
 
+        // 电视固件经常裁掉“特殊权限”入口，但 AOSP TV 设置的 AppsActivity 还在：
+        // 从这里能进 App permissions / Special app access，手动设置每个应用的悬浮窗和通知使用权。
+        card.addView(permissionRowWithDivider(
+                getString(R.string.permission_app_management),
+                getString(R.string.permission_open),
+                true,
+                new View.OnClickListener() {
+                    @Override public void onClick(View v) {
+                        openAppManagementRow();
+                    }
+                }));
+
         boolean batteryOk = true;
         if (Build.VERSION.SDK_INT >= 23 && !isTv()) {
             PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
@@ -1333,8 +1346,9 @@ public class MainActivity extends Activity {
         runButton.setText(enabled ? getString(R.string.stop) : getString(R.string.start));
         int color = enabled ? COLOR_RED : COLOR_GREEN;
         runButton.setTag(Integer.valueOf(color));
-        setRoundedBg(runButton, color, dp(12));
-        if (runButton.hasFocus()) applyActionFocusStyle(runButton, true);
+        // 用状态列表而不是只靠 onFocusChange：启动/停止按钮是 Button，自定义背景会盖掉
+        // 系统默认焦点高亮；之前的白色描边贴在白色卡片上，电视上几乎看不见。
+        setRunButtonBackground(color);
     }
 
     private void updateStatus(boolean alive) {
@@ -1413,45 +1427,81 @@ public class MainActivity extends Activity {
     }
 
     private void openNotificationSettings() {
-        try {
-            if (Build.VERSION.SDK_INT >= 26) {
-                Intent intent = new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS);
-                intent.putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName());
-                startActivity(intent);
-            } else {
-                openAppDetailsSettings();
-            }
-        } catch (Exception e) {
-            showTip(getString(R.string.toast_open_settings_failed, e.getMessage()), false);
+        if (Build.VERSION.SDK_INT >= 26) {
+            Intent intent = new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS);
+            intent.putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName());
+            if (startSettingsSafely(intent)) return;
+        }
+        settingsFallback();
+    }
+
+    private void openOverlaySettings() {
+        if (Build.VERSION.SDK_INT >= 23) {
+            Intent intent = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:" + getPackageName()));
+            if (startSettingsSafely(intent)) return;
+        }
+        settingsFallback();
+    }
+
+    private void openNotificationListenerSettings() {
+        if (startSettingsSafely(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))) return;
+        settingsFallback();
+    }
+
+    /**
+     * 系统设置页在电视固件上经常被裁掉（MiTV 实测三个页面都 resolve 不到）。
+     * 旧实现把 ActivityNotFoundException 原文弹成“无法打开设置:No Activity found…”，
+     * 用户看不懂。这里统一兜底：电视先试 AOSP TV 设置的应用管理页（里面有
+     * App permissions / Special app access），再不行才跳到关于页的 ADB 命令卡片。
+     */
+    private void settingsFallback() {
+        if (openAppManagementSettings()) {
+            showTip(getString(R.string.toast_settings_app_management), false);
+            return;
+        }
+        fallbackToDetailsOrHelp();
+    }
+
+    /** 权限卡片里的“应用管理 / 特殊权限”入口：打开成功就停在系统页，失败再给应用详情或 ADB。 */
+    private void openAppManagementRow() {
+        if (openAppManagementSettings()) return;
+        fallbackToDetailsOrHelp();
+    }
+
+    private void fallbackToDetailsOrHelp() {
+        if (isTv()) {
+            showTip(getString(R.string.toast_settings_not_on_tv), false);
+            showTvHelp();
+        } else {
+            showTip(getString(R.string.toast_settings_failed_app_details), false);
             openAppDetailsSettings();
         }
     }
 
-    private void openOverlaySettings() {
-        try {
-            if (Build.VERSION.SDK_INT >= 23) {
-                Intent intent = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                        Uri.parse("package:" + getPackageName()));
-                startActivity(intent);
-            } else {
-                openAppDetailsSettings();
-            }
-        } catch (Exception e) {
-            showTip(getString(R.string.toast_open_settings_failed, e.getMessage()), false);
-            if (isTv()) showTvHelp();
-            else openAppDetailsSettings();
-        }
+    /**
+     * 打开应用管理页。电视上优先走 AOSP TV 设置的 AppsActivity，
+     * 它自带“App permissions / Special app access”，比厂商设置更容易找到悬浮窗和通知使用权。
+     */
+    private boolean openAppManagementSettings() {
+        if (startSettingsSafely(new Intent(Settings.ACTION_MANAGE_APPLICATIONS_SETTINGS))) return true;
+        if (startSettingsSafely(new Intent().setComponent(new ComponentName(
+                "com.android.tv.settings",
+                "com.android.tv.settings.device.apps.AppsActivity")))) return true;
+        // 小米自带设置（MiTV-MFTR0 实测）没有应用管理/特殊权限页，不能再把用户带过去，
+        // 否则会误以为入口已经打开。这里直接失败，由调用方给出 ADB 命令。
+        return false;
     }
 
-    private void openNotificationListenerSettings() {
+    private boolean startSettingsSafely(Intent intent) {
         try {
-            startActivity(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS));
+            // 不能用 resolveActivity 做前置判断：Android 11+ 的包可见性会把它过滤成 null，
+            // 手机上明明有设置页也会被误判。startActivity 对系统设置不受包可见性限制，
+            // 页面不存在时抛 ActivityNotFoundException，交给 catch 兜底即可。
+            startActivity(intent);
+            return true;
         } catch (Exception e) {
-            // 小米 Android 11 固件直接没有这个页面（quizgate D1 实测 resolve 不到），
-            // 只能把用户带到关于页，用 ADB 命令开启。
-            showTip(getString(R.string.toast_open_settings_failed, e.getMessage()), false);
-            if (isTv()) showTvHelp();
-            else openAppDetailsSettings();
+            return false;
         }
     }
 
@@ -1660,6 +1710,12 @@ public class MainActivity extends Activity {
     }
 
     private void applyActionFocusStyle(View view, boolean focused) {
+        // 启动/停止按钮的背景由 StateListDrawable 自己处理焦点态；
+        // 这里再画一层会把状态列表覆盖掉，反而把蓝框弄丢。
+        if (view == runButton) {
+            view.animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(80).start();
+            return;
+        }
         Object tag = view.getTag();
         if (tag instanceof Integer) {
             GradientDrawable bg = new GradientDrawable();
@@ -1793,6 +1849,23 @@ public class MainActivity extends Activity {
         drawable.setColor(color);
         drawable.setCornerRadius(radius);
         setBackgroundCompat(view, drawable);
+    }
+
+    /** 启动/停止按钮：平时保持红/绿，获得遥控焦点时套一圈蓝色描边。 */
+    private void setRunButtonBackground(int color) {
+        GradientDrawable normal = new GradientDrawable();
+        normal.setColor(color);
+        normal.setCornerRadius(dp(12));
+
+        GradientDrawable focused = new GradientDrawable();
+        focused.setColor(color);
+        focused.setCornerRadius(dp(12));
+        focused.setStroke(dp(3), COLOR_ACCENT);
+
+        StateListDrawable states = new StateListDrawable();
+        states.addState(new int[] {android.R.attr.state_focused}, focused);
+        states.addState(new int[] {}, normal);
+        setBackgroundCompat(runButton, states);
     }
 
     @SuppressWarnings("deprecation")
