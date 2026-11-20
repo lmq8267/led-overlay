@@ -93,7 +93,12 @@ public class LedService extends Service {
     };
     private final Runnable pendingAckFlusher = new Runnable() {
         @Override public void run() {
-            flushPendingCompletedAcks();
+            // 只补发 received/displaying/failed；completed 不再定时重发。
+            // 服务端断电后任务号可能从头复用，旧 completed 的定时补发会把一条
+            // 还没显示过的新任务直接标成已完成（2026-11-20 实机断电复现）。
+            // 真正丢掉的 completed 不靠补发兜底：服务端会认为任务未完成，重连后重新下发，
+            // 客户端重新显示完成后再上报一次，状态自然收敛。
+            flushPendingAcks();
             if (Prefs.running(LedService.this) && mainHandler != null) {
                 mainHandler.postDelayed(this, 5000);
             }
@@ -111,6 +116,11 @@ public class LedService extends Service {
         Prefs.setRunning(this, true);
         // 只有服务真的起来了才清“待恢复”标记；startForegroundService 被系统拒绝时保留，等下次锚点重试。
         Prefs.setPendingRestore(this, false);
+        // 必须赶在 WebSocket 连上和 ACK 补发线程启动之前：断电重启后要把上一轮的
+        // done_tasks / 待补发 completed 作废，否则服务端重新下发的消息会被直接回成已完成。
+        if (Prefs.resetTaskMemoryIfNewBoot(this)) {
+            LogStore.append(this, "检测到新的开机批次（或首次运行），已清理上一轮任务记忆和待补发 ACK");
+        }
         Prefs.touchHeartbeat(this);
         mainHandler.post(heartbeat);
         registerNetworkCallback();
@@ -331,7 +341,9 @@ public class LedService extends Service {
                         ackSecret = json.optString("secret", "");
                         // 不能把整帧写进日志：里面有本次连接的 ACK 密钥。
                         LogStore.append(LedService.this, "连接握手完成，已更新 ACK 密钥");
-                        flushPendingCompletedAcks();
+                        // 只补发 received/displaying 这类中间态，并且 completed 永远不在这里补：
+                        // 旧 completed ACK 可能在服务端断电后被任务号复用撞上，把新任务直接标成已完成。
+                        flushPendingAcks();
                         return;
                     }
                     LogStore.append(LedService.this, getString(R.string.log_message, text));
@@ -435,15 +447,22 @@ public class LedService extends Service {
     }
 
     private void receiveMessage(final LedMessage message) {
-        if (Prefs.isTaskDone(this, message.taskId)) {
-            if (Prefs.hasPendingCompletedAck(this, message.taskId)) return;
-            sendAckReliable(message.taskId, "completed", "客户端记录显示已完成，跳过重复显示");
-            return;
-        }
         if (isDisplayingOrQueued(message.taskId)) {
             sendAckReliable(message.taskId, "received", "客户端已收到任务，当前已在本地显示队列中");
             return;
         }
+        // 只有本进程真的显示完成才允许上报 completed。
+        // 旧实现直接回 completed 的依据是落盘的 done_tasks，但“显示完成”和“ACK 送达服务端”
+        // 之间可能被断电/断网打断（2026-11-20 实机断电：下发 t8 后立刻显示已完成，电视没显示）。
+        // 服务端此时仍认为任务未完成，会重新下发，客户端必须重新显示而不是直接确认。
+        // 也不能因为还有 pending completed 就跳过显示：那笔 ACK 可能正是断电前没送出去的，
+        // 继续补发只会让服务端把一条没显示过的任务标成已完成。
+        if (Prefs.isTaskDone(this, message.taskId)) {
+            LogStore.append(this, "服务端重新下发已显示过的任务，重新显示：" + message.taskId);
+        }
+        // 上一次运行可能还留着待补发的 completed 标记；先清掉，否则 1 秒/3 秒的
+        // 重试仍可能把服务端状态改成已完成，而这一次显示其实还没结束。
+        Prefs.removePendingCompletedAck(this, message.taskId);
         synchronized (displayQueue) {
             displayQueue.add(message);
         }
@@ -538,10 +557,17 @@ public class LedService extends Service {
                     }
                 });
                 sendAckReliable(message.taskId, "displaying", "客户端正在按本地队列显示该任务");
+                // 开始/结束都留痕：冷启动后如果只看到“已完成”而没有这两行，
+                // 说明 completed 不是显示流程发出的，能直接定位到 ACK 逻辑而不是悬浮窗。
+                final long displayStartedAt = SystemClock.elapsedRealtime();
+                LogStore.append(LedService.this, "开始显示任务：" + message.taskId);
                 view.show(message, new OverlayView.Listener() {
                     @Override public void onFinished(String taskId) {
                         Prefs.markTaskDone(LedService.this, taskId);
-                        LogStore.append(LedService.this, "任务显示完成，正在上报服务端：" + taskId);
+                        long shownMs = Math.max(0L, SystemClock.elapsedRealtime() - displayStartedAt);
+                        LogStore.append(LedService.this,
+                                "任务显示完成（" + (shownMs / 1000) + " 秒，绘制 "
+                                        + view.drawnFrames() + " 帧），正在上报服务端：" + taskId);
                         sendAckReliable(taskId, "completed", "客户端显示完成");
                         synchronized (displayQueue) {
                             if (displayingTaskId.equals(taskId)) displayingTaskId = "";
@@ -778,24 +804,17 @@ public class LedService extends Service {
         return false;
     }
 
-    private void flushPendingCompletedAcks() {
+    private void flushPendingAcks() {
         String all = Prefs.pendingAcks(this);
-        if (all.length() > 0) {
-            String[] entries = all.split("\\|");
-            for (int i = 0; i < entries.length; i++) {
-                int sep = entries[i].indexOf(':');
-                if (sep > 0 && sep + 1 < entries[i].length()) {
-                    String status = entries[i].substring(0, sep);
-                    String taskId = entries[i].substring(sep + 1);
-                    sendAckReliable(taskId, status);
-                }
+        if (all.length() == 0) return;
+        String[] entries = all.split("\\|");
+        for (int i = 0; i < entries.length; i++) {
+            int sep = entries[i].indexOf(':');
+            if (sep > 0 && sep + 1 < entries[i].length()) {
+                String status = entries[i].substring(0, sep);
+                String taskId = entries[i].substring(sep + 1);
+                sendAckReliable(taskId, status);
             }
-        }
-        String pending = Prefs.pendingCompletedAcks(this);
-        if (pending.length() == 0) return;
-        String[] ids = pending.split("\\|");
-        for (int i = 0; i < ids.length; i++) {
-            if (ids[i].length() > 0) sendAckReliable(ids[i], "completed");
         }
     }
 

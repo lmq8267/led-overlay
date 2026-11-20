@@ -34,6 +34,10 @@ final class Prefs {
     static final String KEY_DONE_TASKS = "done_tasks";
     static final String KEY_PENDING_ACKS = "pending_acks";
     static final String KEY_PENDING_COMPLETED_ACKS = "pending_completed_acks";
+    /** 任务记忆所属的开机批次；断电重启后与当前 BOOT_COUNT 不一致就整体作废。 */
+    static final String KEY_TASK_BOOT_COUNT = "task_boot_count";
+    /** 拿不到 BOOT_COUNT 的老固件用开机计时兜底：重启后 elapsedRealtime 会变小。 */
+    static final String KEY_TASK_BOOT_ELAPSED = "task_boot_elapsed";
 
     private Prefs() {}
 
@@ -223,6 +227,53 @@ final class Prefs {
         if (taskId == null || taskId.length() == 0) return "";
         String server = WsClient.normalize(server(context));
         return server + "#" + taskId;
+    }
+
+    /**
+     * 断电 / 关机重启后作废上一轮运行留下的任务记忆。
+     *
+     * <p>为什么必须清：done_tasks 在“显示完成”时就落盘，但 completed ACK 可能因为断电、
+     * 断网没有送到服务端（2026-11-20 实机断电复现：服务端下发 t8 后立刻变成已完成，
+     * 电视却没有显示）。而服务端如果在断电时丢了状态、任务编号从头复用，旧任务记忆会和
+     * 新任务撞上同一个 taskId；不跨开机作废的话，这一轮的状态很容易被上一轮“污染”。
+     *
+     * <p>pending_completed_acks 也一起清：completed 现在已经不做事先/定时补发，
+     * 但旧版本或异常退出可能留下标记，跨开机清掉能保证本次开机只按真实显示结果上报。
+     *
+     * <p>同一次开机内被系统杀进程不会触发清理（BOOT_COUNT 不变），避免服务自愈重启后
+     * 把已经显示完的任务再放一遍。
+     *
+     * @return 是否真的按“新开机”清理过
+     */
+    static synchronized boolean resetTaskMemoryIfNewBoot(Context context) {
+        SharedPreferences prefs = store(context);
+        int currentBoot = bootCount(context);
+        int storedBoot = prefs.getInt(KEY_TASK_BOOT_COUNT, Integer.MIN_VALUE);
+        long currentElapsed = android.os.SystemClock.elapsedRealtime();
+        long storedElapsed = prefs.getLong(KEY_TASK_BOOT_ELAPSED, -1L);
+        boolean newBoot;
+        if (storedBoot == Integer.MIN_VALUE && storedElapsed < 0L) {
+            // 旧版本没有记录：升级后第一次启动按新开机处理，顺手清掉可能已经对不上的旧数据。
+            newBoot = true;
+        } else if (storedBoot >= 0 && currentBoot >= 0) {
+            newBoot = storedBoot != currentBoot;
+        } else {
+            // 没有 BOOT_COUNT 的固件只能看开机计时：重启后 elapsedRealtime 归零变小。
+            newBoot = storedElapsed < 0L || currentElapsed < storedElapsed;
+        }
+        SharedPreferences.Editor marker = prefs.edit()
+                .putInt(KEY_TASK_BOOT_COUNT, currentBoot)
+                .putLong(KEY_TASK_BOOT_ELAPSED, currentElapsed);
+        if (!newBoot) {
+            marker.apply();
+            return false;
+        }
+        // 断电后进程可能马上又被回收，这里必须同步落盘，不能留异步写窗口。
+        marker.remove(KEY_DONE_TASKS)
+                .remove(KEY_PENDING_ACKS)
+                .remove(KEY_PENDING_COMPLETED_ACKS)
+                .commit();
+        return true;
     }
 
     static String pendingAcks(Context context) {

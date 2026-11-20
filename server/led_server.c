@@ -89,6 +89,31 @@ static Admin *admins = NULL;
 static LogEntry *logs = NULL;
 static int next_client_id = 1;
 static int next_task_id = 1;
+/**
+ * 本次进程的运行标记，拼进任务 ID。
+ *
+ * <p>为什么需要：任务 ID 原来是裸的 t1/t2…，断电重启后如果 state.db 丢了，
+ * next_task_id 会从 1 重来，新任务就会和客户端上一轮已经显示过的 t8 撞号。
+ * 客户端按 taskId 记录“已显示/待补发”，撞号会导致新任务被直接当成已完成上报
+ * （2026-11-20 服务端和电视同时断电后实机复现）。带上进程启动时间 + 随机标记后，
+ * 即使状态文件丢失、计数器归零，新 ID 也不会和上一轮碰撞。
+ */
+static char task_run_tag[32] = "";
+
+static void init_task_run_tag(void) {
+    unsigned char raw[4] = {0};
+    FILE *f = fopen("/dev/urandom", "rb");
+    if (f) {
+        if (fread(raw, 1, sizeof(raw), f) != sizeof(raw)) memset(raw, 0, sizeof(raw));
+        fclose(f);
+    }
+    unsigned noise = ((unsigned)raw[0] << 24) | ((unsigned)raw[1] << 16)
+                   | ((unsigned)raw[2] << 8) | (unsigned)raw[3];
+    // 时间戳方便人看和排查；再拼 8 位随机数（1/2^32），防止路由器刚上电时钟还没同步、
+    // 两次重启拿到同一个时间戳时又撞号。没有 /dev/urandom 就用时间 + pid 兜底。
+    if (noise == 0) noise = (unsigned)time(NULL) ^ ((unsigned)getpid() << 16);
+    snprintf(task_run_tag, sizeof(task_run_tag), "%ld-%08x", (long)time(NULL), noise);
+}
 static int log_count = 0;
 static const char *STATE_DIR = "/var/lib/led-overlay";
 static const char *STATE_FILE = "/var/lib/led-overlay/state.db";
@@ -952,7 +977,7 @@ static void normalize_active_tasks(Client *c) {
 static Task *clone_task_as_new(Task *src) {
     if (!src) return NULL;
     Task *t = calloc(1, sizeof(Task));
-    snprintf(t->id, sizeof(t->id), "t%d", next_task_id++);
+    snprintf(t->id, sizeof(t->id), "t%.19s-%u", task_run_tag, (unsigned)next_task_id++);
     snprintf(t->text, sizeof(t->text), "%s", src->text);
     snprintf(t->background, sizeof(t->background), "%s", src->background);
     snprintf(t->foreground, sizeof(t->foreground), "%s", src->foreground);
@@ -1071,7 +1096,13 @@ static void load_state(void) {
             if (strcmp(t->status, "sent") == 0) set_task_status(t, "pending");
             if (t->updated_at <= 0) t->updated_at = time(NULL);
             append_task(c, t);
-            if (t->id[0] == 't') { int id = atoi(t->id + 1); if (id > max_task) max_task = id; }
+            if (t->id[0] == 't') {
+                // 新格式是 t<运行标记>-<序号>，旧的兼容格式是 t8：
+                // 取最后一个 '-' 之后才是计数器，否则 atoi("a1b2c3d4-8") 会得到 0。
+                const char *num = strrchr(t->id, '-');
+                int id = atoi(num ? num + 1 : t->id + 1);
+                if (id > max_task) max_task = id;
+            }
         } else if (n >= 3 && strcmp(fields[0], "LOG") == 0) {
             LogEntry *entry = calloc(1, sizeof(LogEntry));
             hex_decode(entry->time, sizeof(entry->time), fields[1]);
@@ -1135,7 +1166,7 @@ static void handle_admin(int fd, time_t session_expires) {
         if (c && strcmp(type, "send") == 0) {
             Task *t = calloc(1, sizeof(Task));
             if (!t) { pthread_mutex_unlock(&lock); continue; }
-            snprintf(t->id, sizeof(t->id), "t%d", next_task_id++);
+            snprintf(t->id, sizeof(t->id), "t%.19s-%u", task_run_tag, (unsigned)next_task_id++);
             json_value(buf, "text", t->text, sizeof(t->text));
             json_value(buf, "background", t->background, sizeof(t->background)); if (!valid_color(t->background)) strcpy(t->background, "#000000");
             json_value(buf, "foreground", t->foreground, sizeof(t->foreground)); if (!valid_color(t->foreground)) strcpy(t->foreground, "#ff0000");
@@ -1909,6 +1940,8 @@ static int listen_socket(const char *addr, const char *port, int family) {
    ═══════════════════════════════════════════════════════════ */
 int main(int argc, char **argv) {
     openlog("【LED悬浮消息】", LOG_PID, LOG_USER);
+    // 必须在创建任何任务之前确定本次运行的 ID 前缀。
+    init_task_run_tag();
     const char *addr = "0.0.0.0";
     const char *port = "12366";
     int reset_pw = 0;

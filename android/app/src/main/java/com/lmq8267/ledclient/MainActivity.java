@@ -21,6 +21,7 @@ import android.os.Looper;
 import android.os.PowerManager;
 import android.provider.Settings;
 import android.text.InputType;
+import android.text.TextUtils;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
@@ -630,6 +631,11 @@ public class MainActivity extends Activity {
                     idTag.setTypeface(Typeface.DEFAULT_BOLD);
                     idTag.setGravity(Gravity.CENTER);
                     idTag.setPadding(dp(8), dp(3), dp(8), dp(3));
+                    // 任务号现在带运行标记（t<时间戳>-<随机段>-<序号>），比原来的 t8 长很多；
+                    // 单行 + 中间省略，避免在手机窄屏上把时间挤没或撑出卡片。
+                    idTag.setSingleLine(true);
+                    idTag.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+                    idTag.setMaxWidth(dp(190));
                     GradientDrawable tagBg = new GradientDrawable();
                     tagBg.setColor(Color.rgb(239, 246, 255));
                     tagBg.setStroke(dp(1), Color.rgb(191, 219, 254));

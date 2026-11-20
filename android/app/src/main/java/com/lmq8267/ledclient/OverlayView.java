@@ -23,6 +23,8 @@ final class OverlayView extends View {
     private float x;
     private long lastFrameAt;
     private int completedLoops;
+    /** 本任务实际画过多少帧；用于日志区分“窗口不可见但计时跑完”和“真的画出来了”。 */
+    private int drawnFrames;
     private final Runnable tick = new Runnable() {
         @Override public void run() {
             if (message == null) return;
@@ -66,6 +68,7 @@ final class OverlayView extends View {
         paint.setTextSize(Math.max(30, h * 0.62f));
         x = w;
         completedLoops = 0;
+        drawnFrames = 0;
         lastFrameAt = SystemClock.elapsedRealtime();
         setVisibility(VISIBLE);
         bringToFront();
@@ -92,6 +95,10 @@ final class OverlayView extends View {
         return message != null;
     }
 
+    int drawnFrames() {
+        return drawnFrames;
+    }
+
     @Override
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
@@ -99,6 +106,7 @@ final class OverlayView extends View {
             canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR);
             return;
         }
+        drawnFrames++;
         canvas.drawColor(message.background);
         Paint.FontMetrics fm = paint.getFontMetrics();
         float y = getHeight() / 2f - (fm.ascent + fm.descent) / 2f;
