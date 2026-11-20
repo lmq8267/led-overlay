@@ -80,6 +80,9 @@
     <string name="tv_adb_command2">adb shell cmd notification allow_listener %s</string>
     <string name="tv_adb_command3">adb shell appops set %s RUN_ANY_IN_BACKGROUND allow</string>
     <string name="tv_adb_command4">adb shell settings get secure enabled_notification_listeners</string>
-    <string name="copy_adb">Copy all 4 ADB commands</string>
-    <string name="toast_adb_copied">4 ADB commands copied</string>
+    <string name="tv_adb_command5">adb shell dumpsys deviceidle whitelist +%s</string>
+    <string name="copy_adb">Copy all ADB commands</string>
+    <string name="toast_adb_copied">ADB commands copied</string>
+    <string name="toast_releases_copied">No browser on this TV. Download link copied.</string>
+    <string name="toast_battery_not_on_tv">Battery optimization does not apply to this TV. Use the ADB commands for keep-alive.</string>
 </resources>

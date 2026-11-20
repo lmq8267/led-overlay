@@ -79,6 +79,9 @@
     <string name="tv_adb_command2">adb shell cmd notification allow_listener %s</string>
     <string name="tv_adb_command3">adb shell appops set %s RUN_ANY_IN_BACKGROUND allow</string>
     <string name="tv_adb_command4">adb shell settings get secure enabled_notification_listeners</string>
-    <string name="copy_adb">一键复制四条 ADB 命令</string>
-    <string name="toast_adb_copied">四条 ADB 命令已复制</string>
+    <string name="tv_adb_command5">adb shell dumpsys deviceidle whitelist +%s</string>
+    <string name="copy_adb">一键复制全部 ADB 命令</string>
+    <string name="toast_adb_copied">ADB 命令已复制</string>
+    <string name="toast_releases_copied">电视没有浏览器，下载地址已复制</string>
+    <string name="toast_battery_not_on_tv">电视端无需设置电池优化，保活请用下方 ADB 命令</string>
 </resources>

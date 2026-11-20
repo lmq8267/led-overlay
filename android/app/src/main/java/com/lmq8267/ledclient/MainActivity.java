@@ -998,14 +998,21 @@ public class MainActivity extends Activity {
 
         final String pkg = getPackageName();
         final String notifComponent = pkg + "/" + pkg + ".LedNotifProbe";
-        // 前三条是装机必需：悬浮窗、通知使用权（强停后复活）、后台运行兜底；第四条只用于验证。
+        // 前三条是装机必需：悬浮窗、通知使用权（强停后复活）、后台运行兜底；
+        // 第四条只用于验证，第五条把电视加入 Doze 白名单。
         final String[] cmds = new String[] {
                 getString(R.string.tv_adb_command, pkg),
                 getString(R.string.tv_adb_command2, notifComponent),
                 getString(R.string.tv_adb_command3, pkg),
                 getString(R.string.tv_adb_command4),
+                getString(R.string.tv_adb_command5, pkg),
         };
-        final String allCmds = cmds[0] + "\n" + cmds[1] + "\n" + cmds[2] + "\n" + cmds[3];
+        StringBuilder all = new StringBuilder();
+        for (int i = 0; i < cmds.length; i++) {
+            if (i > 0) all.append('\n');
+            all.append(cmds[i]);
+        }
+        final String allCmds = all.toString();
 
         for (int i = 0; i < cmds.length; i++) {
             TextView codeView = new TextView(this);
@@ -1102,12 +1109,20 @@ public class MainActivity extends Activity {
         right.setTypeface(Typeface.DEFAULT_BOLD);
         if (link) {
             right.setTextColor(COLOR_ACCENT);
+            final String releasesUrl = "https://github.com/lmq8267/led-overlay/releases";
             View.OnClickListener openRepo = new View.OnClickListener() {
                 @Override public void onClick(View v) {
                     try {
-                        startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/lmq8267/led-overlay")));
+                        startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(releasesUrl)));
                     } catch (Exception ignored) {
-                        showTip(getString(R.string.toast_open_settings_failed, getString(R.string.menu_about)), false);
+                        // 电视通常没有浏览器，ACTION_VIEW 会直接找不到 Activity。
+                        // 旧代码在这里弹“无法打开设置：关于”，用户会误以为跳到了关于页；
+                        // 改成把 Releases 地址复制到剪贴板，用户可以在手机/电脑上打开。
+                        ClipboardManager mgr = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                        if (mgr != null) {
+                            mgr.setPrimaryClip(ClipData.newPlainText("LED releases", releasesUrl));
+                        }
+                        showTip(getString(R.string.toast_releases_copied), false);
                     }
                 }
             };
@@ -1518,8 +1533,16 @@ public class MainActivity extends Activity {
     }
 
     private void openBatteryOptimizationSettings() {
+        if (isTv()) {
+            // 电视固件没有电池优化页（MiTV-MFTR0 实测 ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS
+            // 也没有 handler）。旧代码在这里调用 openAppDetailsSettings()，而它吞掉异常，
+            // 所以点卡片完全没有提示。这里明确告诉用户电视端不需要这一项。
+            showTip(getString(R.string.toast_battery_not_on_tv), false);
+            showTvHelp();
+            return;
+        }
         try {
-            if (Build.VERSION.SDK_INT >= 23 && !isTv()) {
+            if (Build.VERSION.SDK_INT >= 23) {
                 PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
                 if (pm != null && !pm.isIgnoringBatteryOptimizations(getPackageName())) {
                     Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
@@ -1537,12 +1560,14 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void openAppDetailsSettings() {
+    private boolean openAppDetailsSettings() {
         try {
             Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
                     Uri.parse("package:" + getPackageName()));
             startActivity(intent);
-        } catch (Exception ignored) {
+            return true;
+        } catch (Exception e) {
+            return false;
         }
     }
 
